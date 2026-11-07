@@ -1,0 +1,20 @@
+{
+  "rewrites": [
+    {
+      "source": "/product-image/:id",
+      "destination": "/api/product-image?id=:id"
+    },
+    {
+      "source": "/p/:merchant/:id",
+      "destination": "/api/product-preview?merchant=:merchant&id=:id"
+    },
+    {
+      "source": "/p/:id",
+      "destination": "/api/product-preview?id=:id"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}
