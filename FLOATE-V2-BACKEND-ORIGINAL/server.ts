@@ -13,6 +13,7 @@ import { extractCategoryIntent, normalizeFloateCategory } from "./services/inten
 import { ANCHOR_BUSINESSES } from "./controllers/searchController";
 import { createMerchantSlug } from "./src/utils/merchantSlug";
 import { normalizeWhatsAppNumber } from "./src/utils/whatsapp";
+import { handleWhatsAppVerification, handleWhatsAppWebhook } from "./src/bot/services/whatsappService.js";
 import { SEO_HUBS_DATA } from "./src/data/seoHubs";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch } from "firebase/firestore";
@@ -39,6 +40,8 @@ const requireAdminApiKey: express.RequestHandler = (req, res, next) => {
 };
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
+app.get(["/whatsapp-webhook", "/api/whatsapp-webhook"], handleWhatsAppVerification);
+app.post(["/whatsapp-webhook", "/api/whatsapp-webhook"], handleWhatsAppWebhook);
 app.use(v1Router);
 app.use(searchRouter);
 
