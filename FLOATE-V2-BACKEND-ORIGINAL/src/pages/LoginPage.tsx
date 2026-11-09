@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { MessageCircle, Phone, ArrowRight, ArrowLeft, Copy, Check, Loader2, ShieldCheck, RefreshCcw, Sparkles, Store } from "lucide-react";
-import { floateApi, FLOATE_WHATSAPP_AUTH_NUMBER } from "../services/floateApi";
+import { floateApi } from "../services/floateApi";
 
 interface LoginPageProps {
   onBackToHome: () => void;
@@ -162,7 +162,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   };
 
-  const activeWhatsappDeepLink = whatsappLink || `https://wa.me/${FLOATE_WHATSAPP_AUTH_NUMBER}?text=${encodeURIComponent(`AUTH: ${challengeCode}`)}`;
+  const activeWhatsappDeepLink = whatsappLink;
 
   return (
     <div className="min-h-screen bg-[#FAF8F2] text-[#13241F] flex flex-col font-sans selection:bg-[#FACC15] selection:text-[#13241F]">

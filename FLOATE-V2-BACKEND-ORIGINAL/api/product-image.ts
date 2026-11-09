@@ -1,7 +1,8 @@
 const BACKEND_URL = (
   process.env.FLOATE_BACKEND_URL ||
+  process.env.VITE_FLOATE_BACKEND_URL ||
   process.env.NEXT_PUBLIC_FLOATE_BACKEND_URL ||
-  "https://floate-v2-backend-original.onrender.com"
+  ""
 ).replace(/\/+$/, "");
 
 function queryValue(value: unknown): string {
@@ -29,7 +30,7 @@ export default async function handler(req: any, res: any) {
     const payload = await response.json();
     const product = payload?.product;
     const image = (Array.isArray(product?.photos) ? product.photos[0] : "") ||
-      product?.photo_url || product?.imageUrl || product?.image || "";
+      product?.photo_url || product?.photoUrl || product?.imageUrl || product?.image || "";
 
     if (typeof image !== "string" || !image.trim()) {
       return sendText(res, 404, "Product image is unavailable.");

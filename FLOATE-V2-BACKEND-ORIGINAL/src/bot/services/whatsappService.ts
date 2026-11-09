@@ -8,7 +8,7 @@ import { whatsappAuthService } from './whatsappAuthService.js';
 import { matchCoordinatesToNigerianMarket } from './marketGeoService.js';
 import {
   parseShoppingQuery,
-  transcribeAudioWithWhisper,
+  transcribeAndAnalyzeAudio,
   validateSelfieWithGeminiVision,
   verifyNinDocumentWithGeminiVision,
   verifyLivenessVideoWithGemini,
@@ -44,6 +44,7 @@ import {
   VisualProductAnalysis,
 } from './aiService.js';
 import { saveCatalogMedia } from './mediaStorageService.js';
+import { redisService } from './redisService.js';
 import {
   getWhatsAppSession,
   updateWhatsAppSession,
@@ -170,7 +171,7 @@ export function getAppBaseUrl(): string {
   if (currentPublicBaseUrl && currentPublicBaseUrl.startsWith('http')) {
     return currentPublicBaseUrl;
   }
-  return process.env.FLOATE_BACKEND_URL || 'https://floate-v2-backend-original.onrender.com';
+  return process.env.FLOATE_BACKEND_URL || currentPublicBaseUrl || 'https://www.floate.xyz';
 }
 
 export function getFrontendWebUrl(): string {
@@ -4281,6 +4282,20 @@ async function sendSingleMessageRegistrationPrompt(toPhone: string, senderName: 
 /**
  * MASTER CONVERSATIONAL ENGINE FOR FLOATE ON WHATSAPP
  */
+async function sendFloateTaskClarification(toPhone: string): Promise<void> {
+  await sendWhatsAppMessage(
+    toPhone,
+    `I can help with Floate shopping searches, merchant tools, market hubs, and Floate FAQs. What would you like to do?`,
+    {
+      quickReplies: [
+        { id: 'btn_find_product', title: 'Find a product' },
+        { id: 'btn_for_businesses', title: 'Merchant tools' },
+        { id: 'btn_browse_markets', title: 'Browse markets' },
+      ],
+    }
+  );
+}
+
 export async function processMasterWhatsAppEngine(params: {
   senderPhone: string;
   senderName: string;
@@ -4302,11 +4317,27 @@ export async function processMasterWhatsAppEngine(params: {
 
   // 1. Process Voice Note if present
   if (params.audioId) {
+    const hourlySenderLimit = Math.min(12, Math.max(1, Number(process.env.GEMINI_VOICE_TRANSCRIPTIONS_PER_SENDER_PER_HOUR) || 6));
+    const globalHourlyLimit = Math.min(500, Math.max(1, Number(process.env.GEMINI_VOICE_TRANSCRIPTIONS_GLOBAL_PER_HOUR) || 120));
+    const [senderQuota, globalQuota] = await Promise.all([
+      redisService.checkRateLimit(`voice_transcription:sender:${normalizePhone(cleanPhone)}`, hourlySenderLimit, 3600),
+      redisService.checkRateLimit('voice_transcription:global', globalHourlyLimit, 3600),
+    ]);
+    if (!senderQuota.allowed || !globalQuota.allowed) {
+      await sendWhatsAppMessage(
+        cleanPhone,
+        `Voice-note transcription is temporarily at its usage limit. Please type your Floate request or try again later.`
+      );
+      return;
+    }
+
     console.log(`[WhatsApp Voice Note] 🎙️ Processing voice note from +${cleanPhone}...`);
     const media = await downloadWhatsAppMedia(params.audioId);
     if (media) {
       try {
-        text = await transcribeAudioWithWhisper(media.buffer, media.mimeType || params.audioMimeType || 'audio/ogg');
+        const voiceResult = await transcribeAndAnalyzeAudio(media.buffer, media.mimeType || params.audioMimeType || 'audio/ogg');
+        text = voiceResult.transcript.trim();
+        if (!text) throw new Error(voiceResult.analysis || 'Gemini did not return a transcript.');
         console.log(`[WhatsApp Voice Note] ✅ Transcription complete (${text.length} characters).`);
       } catch (err) {
         console.warn('[Voice Transcribe Error]:', err);
@@ -5501,21 +5532,34 @@ export async function processMasterWhatsAppEngine(params: {
           `Your shopping location has been set to *${resolvedLocation}*.`
         );
         await handleHelpOrSupportExplanation(cleanPhone, senderName, pendingSearch);
-      } else if (pendingClassification.intent === 'MERCHANT_PORTAL' || pendingClassification.intent === 'MERCHANT_STATS') {
-        const hints = extractRegistrationHints(pendingSearch);
-        await startConversationalRegistration(cleanPhone, senderName, { location: resolvedLocation, category: hints.category });
+      } else if (pendingClassification.intent === 'MERCHANT_PORTAL') {
+        await handleVendorHubRouting(cleanPhone, senderName);
+      } else if (pendingClassification.intent === 'MERCHANT_STATS') {
+        await handleVendorStats(cleanPhone, senderName);
+      } else if (pendingClassification.intent === 'MERCHANT_ADD_PRODUCT') {
+        await startVendorAddProduct(cleanPhone, senderName);
+      } else if (pendingClassification.intent === 'MERCHANT_EDIT_CATALOG') {
+        await startVendorEditProducts(cleanPhone, senderName);
+      } else if (pendingClassification.intent === 'MERCHANT_SPONSOR_PRODUCTS') {
+        await handleVendorSponsorInquiry(cleanPhone, senderName);
+      } else if (pendingClassification.intent === 'REFERRAL_PROGRAM') {
+        await handleVendorReferralHub(cleanPhone, senderName);
       } else if (pendingClassification.intent === 'BROWSE_MARKETS') {
         await sendWhatsAppMessage(
           cleanPhone,
           `Your shopping location has been set to *${resolvedLocation}*.`
         );
         await sendMarketHubsMenu(cleanPhone);
-      } else {
+      } else if (pendingClassification.intent === 'CLARIFICATION_REQUIRED') {
+        await sendFloateTaskClarification(cleanPhone);
+      } else if (pendingClassification.intent === 'BUYER_SEARCH') {
         await sendWhatsAppMessage(
           cleanPhone,
           `Your shopping location has been set to *${resolvedLocation}*. Searching for "${pendingSearch}" near you:`
         );
         await execute10CardSearch(cleanPhone, senderName, { queryText: pendingSearch, location: resolvedLocation });
+      } else {
+        await sendFloateTaskClarification(cleanPhone);
       }
     } else {
       await sendWhatsAppMessage(
@@ -5573,6 +5617,7 @@ export async function processMasterWhatsAppEngine(params: {
       inputClassification.intent === 'BRAND_QUESTION' ||
       inputClassification.intent === 'SMALL_TALK' ||
       inputClassification.intent === 'HELP_OR_SUPPORT' ||
+      inputClassification.intent === 'CLARIFICATION_REQUIRED' ||
       inputClassification.intent === 'RESET_OR_HOME'
     ) {
       // Answer the question immediately without setting it as their location
@@ -5589,6 +5634,9 @@ export async function processMasterWhatsAppEngine(params: {
           cleanPhone,
           `📍 What city or area are you shopping from?`
         );
+        return;
+      } else if (inputClassification.intent === 'CLARIFICATION_REQUIRED') {
+        await sendFloateTaskClarification(cleanPhone);
         return;
       }
     }
@@ -5675,22 +5723,35 @@ export async function processMasterWhatsAppEngine(params: {
           `Your shopping location has been set to ${cleanLoc}.`
         );
         await handleHelpOrSupportExplanation(cleanPhone, senderName, pendingSearch);
-      } else if (pendingClassification.intent === 'MERCHANT_PORTAL' || pendingClassification.intent === 'MERCHANT_STATS') {
-        const hints = extractRegistrationHints(pendingSearch);
-        await startConversationalRegistration(cleanPhone, senderName, { location: cleanLoc, category: hints.category });
+      } else if (pendingClassification.intent === 'MERCHANT_PORTAL') {
+        await handleVendorHubRouting(cleanPhone, senderName);
+      } else if (pendingClassification.intent === 'MERCHANT_STATS') {
+        await handleVendorStats(cleanPhone, senderName);
+      } else if (pendingClassification.intent === 'MERCHANT_ADD_PRODUCT') {
+        await startVendorAddProduct(cleanPhone, senderName);
+      } else if (pendingClassification.intent === 'MERCHANT_EDIT_CATALOG') {
+        await startVendorEditProducts(cleanPhone, senderName);
+      } else if (pendingClassification.intent === 'MERCHANT_SPONSOR_PRODUCTS') {
+        await handleVendorSponsorInquiry(cleanPhone, senderName);
+      } else if (pendingClassification.intent === 'REFERRAL_PROGRAM') {
+        await handleVendorReferralHub(cleanPhone, senderName);
       } else if (pendingClassification.intent === 'BROWSE_MARKETS') {
         await sendWhatsAppMessage(
           cleanPhone,
           `Your shopping location has been set to ${cleanLoc}.`
         );
         await sendMarketHubsMenu(cleanPhone);
-      } else {
+      } else if (pendingClassification.intent === 'CLARIFICATION_REQUIRED') {
+        await sendFloateTaskClarification(cleanPhone);
+      } else if (pendingClassification.intent === 'BUYER_SEARCH') {
         // Genuine commercial buyer search
         await sendWhatsAppMessage(
           cleanPhone,
           `Your shopping location has been set to ${cleanLoc}. Searching for "${pendingSearch}" near you:`
         );
         await execute10CardSearch(cleanPhone, senderName, { queryText: pendingSearch, location: cleanLoc });
+      } else {
+        await sendFloateTaskClarification(cleanPhone);
       }
     } else {
       await sendWhatsAppMessage(
@@ -6661,6 +6722,11 @@ export async function processMasterWhatsAppEngine(params: {
   if (classification.intent === 'BROWSE_MARKETS') {
     console.log(`[WhatsApp Inbound] 🚀 Routing to: sendMarketHubsMenu (BROWSE_MARKETS)`);
     await sendMarketHubsMenu(cleanPhone);
+    return;
+  }
+
+  if (classification.intent === 'CLARIFICATION_REQUIRED') {
+    await sendFloateTaskClarification(cleanPhone);
     return;
   }
 
@@ -8398,11 +8464,29 @@ export async function handleVendorAddProductWizard(params: {
   // STEP 1: RECEIVING PHOTO
   if (draft.step === 'STEP_1_PHOTO' || draft.step === 'NAME') {
     let photoUrl = '';
-    let photoMediaId = imageId || '';
+    let photoMediaId = '';
 
-    if (imageId) {
-      photoUrl = `/api/media/${imageId}`;
-    } else if (text.startsWith('http') || text.startsWith('data:image')) {
+    if (imageId || text.startsWith('data:image')) {
+      const media = await downloadWhatsAppMedia(imageId || text);
+      if (!media?.buffer?.length) {
+        await sendWhatsAppMessage(
+          cleanPhone,
+          `⚠️ I couldn't download that image. Please resend the product photo or reply "Skip" to continue without one.`
+        );
+        return true;
+      }
+
+      const mimeType = imageMimeType || media.mimeType || 'image/jpeg';
+      const safePhone = cleanPhone.replace(/\D/g, '') || 'merchant';
+      const extension = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg';
+      const savedMedia = await saveCatalogMedia(
+        media.buffer,
+        mimeType,
+        `vendor_${safePhone}_${Date.now()}.${extension}`
+      );
+      photoUrl = savedMedia.publicUrl;
+      photoMediaId = savedMedia.mediaId;
+    } else if (text.startsWith('http')) {
       photoUrl = text;
     }
 
@@ -8435,7 +8519,7 @@ export async function handleVendorAddProductWizard(params: {
       state: 'VENDOR_ADD_PRODUCT',
       vendorAddDraft: {
         ...draft,
-        photoUrl: photoUrl || `/api/media/${photoMediaId}`,
+        photoUrl,
         photoMediaId,
         step: 'STEP_2_NAME',
         updatedAt: new Date().toISOString(),
@@ -9252,7 +9336,23 @@ async function startVendorAddProduct(toPhone: string, senderName: string): Promi
   const merchant = (await firestoreDb.getMerchant(canonicalPhone)) || sheetsDb.getListingByPhone(canonicalPhone);
   const bizName = merchant?.businessName || 'Your Business';
   const baseUrl = getFrontendWebUrl();
-  const addProductUrl = `${baseUrl.replace(/\/+$/, '')}/merchant/dashboard?action=add-product`;
+  if (!merchant) {
+    const registerUrl = buildRegisterUrl({ phone: canonicalPhone });
+    await sendWhatsAppMessage(
+      cleanPhone,
+      `🏪 Register your FLOATE merchant profile before adding products:\n${registerUrl}`
+    );
+    return;
+  }
+
+  const storefrontToken = await whatsappAuthService.generateStorefrontToken(
+    canonicalPhone,
+    String(merchant.id || canonicalPhone)
+  );
+  const dashboardUrl = new URL(`${baseUrl.replace(/\/+$/, '')}/merchant/dashboard`);
+  dashboardUrl.searchParams.set('wa_token', storefrontToken.wa_token);
+  dashboardUrl.searchParams.set('redirect', '/merchant/dashboard?action=add-product');
+  const addProductUrl = dashboardUrl.toString();
 
   const addMsg =
     `🛍️ *Add Products to Your Storefront* 📦\n` +

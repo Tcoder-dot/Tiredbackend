@@ -1,21 +1,16 @@
 /**
  * FLOATE Render Backend Search Service
  * 
- * Routes all searches directly to the live Render backend API:
- * https://floate-v2-backend-original.onrender.com/api/search
+ * Routes searches through the configured Floate backend API.
  * 
  * Completely free of client-side Gemini / Google AI Studio calls.
  */
 
 import { Product, Vendor } from "../types/floate";
 import { ParsedSearchCriteria } from "../types/storefront";
+import { FLOATE_BACKEND_URL } from "./backendUrl";
 
-// Deterministic Floate Backend API Base URL with environment variable fallbacks
-export const RENDER_BACKEND_URL: string = (
-  (typeof process !== "undefined" && (process.env?.NEXT_PUBLIC_FLOATE_API_URL || process.env?.NEXT_PUBLIC_FLOATE_BACKEND_URL)) ||
-  (typeof import.meta !== "undefined" && (import.meta.env?.NEXT_PUBLIC_FLOATE_API_URL || import.meta.env?.VITE_FLOATE_API_URL || import.meta.env?.VITE_FLOATE_BACKEND_URL || import.meta.env?.NEXT_PUBLIC_FLOATE_BACKEND_URL)) ||
-  "https://floate-v2-backend-original.onrender.com"
-).replace(/\/+$/, "");
+export const RENDER_BACKEND_URL = FLOATE_BACKEND_URL;
 
 export const FLOATE_API_URL = RENDER_BACKEND_URL;
 
@@ -79,20 +74,36 @@ export async function searchFloateCatalog(
   if (options?.userLng !== undefined) params.set("userLng", String(options.userLng));
   if (options?.category && options.category !== "All") params.set("category", options.category);
 
+  const searchPath = `/api/webfront/search?${params.toString()}`;
+  const endpoints = [...new Set([`${FLOATE_BACKEND_URL}${searchPath}`, searchPath])];
+
   try {
-    const response = await fetch(`/api/webfront/search?${params.toString()}`, {
-      headers: { Accept: "application/json" },
-      signal: options?.signal
-    });
-    const payload = await response.json().catch(() => null);
-    if (!response.ok || !payload || payload.success === false) {
+    let payload: any = null;
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetch(endpoint, {
+          headers: { Accept: "application/json" },
+          signal: options?.signal
+        });
+        if (!response.ok) continue;
+        const candidate = await response.json().catch(() => null);
+        if (candidate && candidate.success !== false) {
+          payload = candidate;
+          break;
+        }
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") throw error;
+      }
+    }
+
+    if (!payload) {
       return {
         success: false,
         query: cleanQuery,
         totalMatches: 0,
         results: [],
         merchants: [],
-        error: payload?.error || `Catalog search failed (HTTP ${response.status}).`
+        error: "Catalog search failed on the configured backend and same-origin fallback."
       };
     }
 

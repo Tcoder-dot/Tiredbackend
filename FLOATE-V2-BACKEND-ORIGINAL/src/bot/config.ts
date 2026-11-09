@@ -12,7 +12,6 @@ export const config = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN || '',
   webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || '',
   geminiApiKey: process.env.GEMINI_API_KEY || '',
-  openaiApiKey: process.env.OPENAI_API_KEY || '',
   spreadsheetId: process.env.SPREADSHEET_ID || '',
   adminTelegramId: process.env.ADMIN_TELEGRAM_ID || '',
   adminWhatsAppPhone: process.env.ADMIN_WHATSAPP_PHONE || '07065599116',
@@ -21,11 +20,9 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: parseInt(process.env.PORT || '3000', 10),
   // WhatsApp Cloud API (Meta Graph API)
-  whatsappAccessToken:
-    process.env.WHATSAPP_ACCESS_TOKEN ||
-    'EAAa9fW5px2gBSZBdV1Klbrp2FnNWy0iIkJDcb8qBC48ZCyG5ZAmgFdsoxebeBcTOjzq3pJLZCPVJxW3bFQmYwiPTZBaYdZC8ZCjvArVl46SYbTYmRBHBI3xudksiBbNqtbrPP4sJfBky2DVbz8Uwl4dFAv24DwYgrAFjVw8ykJD3YiSNi9VX32twZCZCDg2zmFxLZBMwZDZD',
-  whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '1290427334158497',
-  whatsappVerifyToken: process.env.WHATSAPP_VERIFY_TOKEN || 'floate_wa_verify_token_2026',
+  whatsappAccessToken: process.env.WHATSAPP_ACCESS_TOKEN || '',
+  whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+  whatsappVerifyToken: process.env.WHATSAPP_VERIFY_TOKEN || '',
   whatsappBusinessAccountId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '',
   // Monnify Payment Gateway
   monnifyApiKey: process.env.MONNIFY_API_KEY || '',
@@ -99,6 +96,14 @@ export const isBotConfigured = () => {
 export const isWhatsAppConfigured = () => {
   return Boolean(config.whatsappAccessToken && config.whatsappPhoneNumberId);
 };
+
+export const isWhatsAppAuthConfigured = () => {
+  const destination = process.env.WHATSAPP_AUTH_DESTINATION_PHONE || '';
+  const jwtSecret = process.env.FLOATE_JWT_SECRET || process.env.JWT_SECRET || '';
+  return isWhatsAppConfigured() && destination.replace(/\D/g, '').length >= 10 && jwtSecret.length >= 32;
+};
+
+export const isVoiceTranscriptionConfigured = () => Boolean(process.env.GEMINI_API_KEY || config.geminiApiKey);
 
 export const isMonnifyConfigured = () => {
   return Boolean(config.monnifyApiKey && config.monnifySecretKey && config.monnifyContractCode);

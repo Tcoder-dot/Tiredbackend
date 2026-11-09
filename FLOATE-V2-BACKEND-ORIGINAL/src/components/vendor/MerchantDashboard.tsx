@@ -67,12 +67,17 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
             id: foundLocal.id,
             slug: foundLocal.slug,
             name: foundLocal.name,
+            ownerName: foundLocal.ownerName || foundLocal.ownerFullName,
             city: foundLocal.city,
             state: foundLocal.state,
             category: foundLocal.category,
             verified: isVerified,
             avatar_url: foundLocal.avatar_url || foundLocal.selfieUrl,
             bio: foundLocal.bio,
+            stallAddress: foundLocal.stallAddress || foundLocal.businessAddress,
+            businessAddress: foundLocal.businessAddress || foundLocal.stallAddress,
+            marketHub: foundLocal.marketHub || foundLocal.location,
+            storeType: foundLocal.storeType,
             whatsapp_number: foundLocal.whatsapp_number,
             verificationStatus: foundLocal.verificationStatus || (isVerified ? "APPROVED" : "PENDING_REVIEW"),
             verificationReason: foundLocal.verificationReason || ""
@@ -725,6 +730,11 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
               <div className="space-y-1">
+                <span className="text-[#123F16]/60 font-bold block">Registered Owner</span>
+                <span className="font-extrabold text-[#123F16]">{vendor?.ownerName || vendor?.ownerFullName || "Not set"}</span>
+              </div>
+
+              <div className="space-y-1">
                 <span className="text-[#123F16]/60 font-bold block">Business Handle</span>
                 <span className="font-extrabold text-[#123F16]">@{vendor?.slug || merchantSlug}</span>
               </div>
@@ -735,15 +745,20 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
               </div>
 
               <div className="space-y-1">
-                <span className="text-[#123F16]/60 font-bold block">Physical Location</span>
-                <span className="font-extrabold text-[#123F16]">{vendor?.city}, Nigeria</span>
+                <span className="text-[#123F16]/60 font-bold block">Business Location</span>
+                <span className="font-extrabold text-[#123F16]">{vendor?.businessAddress || vendor?.stallAddress || vendor?.marketHub || vendor?.location || [vendor?.city, vendor?.state].filter(Boolean).join(", ") || "Not set"}</span>
+              </div>
+
+              <div className="space-y-1">
+                <span className="text-[#123F16]/60 font-bold block">Category / Store Type</span>
+                <span className="font-extrabold text-[#123F16]">{vendor?.category || "Not set"}{vendor?.storeType ? ` / ${vendor.storeType.replace(/_/g, " ")}` : ""}</span>
               </div>
 
               <div className="space-y-1">
                 <span className="text-[#123F16]/60 font-bold block">Verification Status</span>
-                <span className="font-extrabold text-[#2E7D32] flex items-center gap-1">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-[#2E7D32]" />
-                  <span>Verified Market Business</span>
+                <span className={`font-extrabold flex items-center gap-1 ${isApprovedMerchant ? "text-[#2E7D32]" : isRejectedMerchant ? "text-red-600" : "text-amber-700"}`}>
+                  {isApprovedMerchant ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
+                  <span>{isApprovedMerchant ? "Verified" : isRejectedMerchant ? "Rejected" : "Pending review"}</span>
                 </span>
               </div>
             </div>

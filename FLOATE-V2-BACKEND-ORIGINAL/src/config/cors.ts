@@ -9,29 +9,48 @@ import { getPublicSiteUrl } from './siteUrls.js';
 
 export function corsMiddleware(req: Request, res: Response, next: NextFunction) {
   const origin = req.headers.origin;
-  let publicSiteUrl = 'https://floate.xyz';
+  const configuredOrigins = [
+    getPublicSiteUrl(),
+    ...(process.env.CORS_ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()),
+  ];
+  const allowedOrigins = new Set(
+    configuredOrigins.flatMap((value) => {
+      try {
+        return [new URL(value).origin];
+      } catch {
+        return [];
+      }
+    })
+  );
+
+  let requestOrigin: URL | null = null;
   try {
-    publicSiteUrl = getPublicSiteUrl();
-  } catch (err) {
-    publicSiteUrl = 'https://floate.xyz';
+    if (origin) requestOrigin = new URL(origin);
+  } catch {
+    requestOrigin = null;
   }
 
-  const isAllowed =
-    !origin ||
-    origin === publicSiteUrl ||
-    origin === 'https://floate.xyz' ||
-    origin === 'https://www.floate.xyz' ||
-    /https?:\/\/(.+\.)?floate\.xyz(:\d+)?$/i.test(origin) ||
-    /\.run\.app$/i.test(origin) ||
-    origin.includes('localhost') ||
-    origin.includes('127.0.0.1');
+  const hostname = requestOrigin?.hostname.toLowerCase() || '';
+  const isAllowed = !origin || Boolean(
+    requestOrigin && (
+      allowedOrigins.has(requestOrigin.origin) ||
+      hostname === 'floate.xyz' ||
+      hostname.endsWith('.floate.xyz') ||
+      hostname.endsWith('.run.app') ||
+      hostname.endsWith('.github.dev') ||
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '[::1]'
+    )
+  );
 
-  if (origin && isAllowed) {
-    res.header('Access-Control-Allow-Origin', origin);
-  } else if (origin) {
-    res.header('Access-Control-Allow-Origin', origin);
-  } else {
-    res.header('Access-Control-Allow-Origin', publicSiteUrl);
+  res.vary('Origin');
+  if (origin && !isAllowed) {
+    return res.status(403).json({ success: false, error: 'Origin is not allowed.' });
+  }
+
+  if (origin && requestOrigin) {
+    res.header('Access-Control-Allow-Origin', requestOrigin.origin);
   }
 
   res.header('Access-Control-Allow-Credentials', 'true');

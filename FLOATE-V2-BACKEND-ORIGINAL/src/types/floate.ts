@@ -5,6 +5,8 @@ export interface Vendor {
   city: string;
   state: string;
   category: string;
+  ownerName?: string;
+  ownerFullName?: string;
   verified: boolean;
   isVerified?: boolean;
   verificationStatus?: string;
@@ -18,6 +20,10 @@ export interface Vendor {
   squareBoostUrl?: string;
   location?: string;
   stallAddress?: string;
+  businessAddress?: string;
+  marketHub?: string;
+  storeType?: string;
+  phone?: string;
   is_spotlight?: boolean;
   avatar_url: string;
   bio: string;

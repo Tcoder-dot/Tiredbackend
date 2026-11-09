@@ -27,8 +27,9 @@ export default async function handler(req: any, res: any) {
     const apiKey = process.env.FLOATE_SEARCH_API_KEY || process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6";
     const backendBase = (
       process.env.FLOATE_BACKEND_URL ||
+      process.env.VITE_FLOATE_BACKEND_URL ||
       process.env.NEXT_PUBLIC_FLOATE_BACKEND_URL ||
-      "https://floate-v2-backend-original.onrender.com"
+      ""
     ).replace(/\/+$/, "");
     const externalApiUrl = `${backendBase}/api/search`;
 

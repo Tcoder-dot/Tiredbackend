@@ -48,18 +48,18 @@ export async function saveCatalogMedia(
     console.warn(`[MediaStorage] Could not write ${cleanId} to disk:`, err);
   }
 
-  // 4. Background cloud storage sync if storage bucket available
-  uploadBufferToStorage(buffer, `catalog/${cleanId}`, mimeType)
-    .then((cloudUrl) => {
-      if (cloudUrl) {
-        console.log(`[MediaStorage] Synced ${cleanId} to Firebase Storage: ${cloudUrl}`);
-      }
-    })
-    .catch((err) => {
-      // Non-blocking notice
-    });
-
-  const publicUrl = `/api/media/${cleanId}`;
+  const cloudUrl = await uploadBufferToStorage(buffer, `catalog/${cleanId}`, mimeType);
+  if (!cloudUrl && process.env.NODE_ENV === 'production') {
+    mediaMemoryCache.delete(cleanId);
+    try {
+      if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
+    } catch (err) {
+      console.warn(`[MediaStorage] Could not remove incomplete upload ${cleanId}:`, err);
+    }
+    throw new Error('Persistent product image storage is unavailable. Please retry the upload.');
+  }
+  const publicUrl = cloudUrl || `/api/media/${cleanId}`;
+  if (cloudUrl) console.log(`[MediaStorage] Synced ${cleanId} to Firebase Storage.`);
   return {
     mediaId: cleanId,
     publicUrl,

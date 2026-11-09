@@ -1,9 +1,14 @@
 import { Router, Request, Response } from "express";
 import { GoogleGenAI, Type } from "@google/genai";
 import { collection, getDocs, doc, getDoc } from "firebase/firestore";
+import { randomInt, timingSafeEqual } from "node:crypto";
 import { firestoreDb } from "../server";
 import { createMerchantSlug } from "../src/utils/merchantSlug";
 import { normalizeWhatsAppNumber } from "../src/utils/whatsapp";
+import { isWhatsAppAuthConfigured, isWhatsAppConfigured } from "../src/bot/config.js";
+import { redisService } from "../src/bot/services/redisService.js";
+import { sendWhatsAppMessage } from "../src/bot/services/whatsappService.js";
+import { formatPhoneNumber, whatsappAuthService } from "../src/bot/services/whatsappAuthService.js";
 
 const router = Router();
 
@@ -472,7 +477,7 @@ export async function getAllProducts(): Promise<any[]> {
         title: p.title || p.name,
         price_naira: Number(p.price_naira || p.price || 0),
         formatted_price: p.formatted_price || formatPrice(Number(p.price_naira || p.price || 0)),
-        photo_url: p.photo_url || p.imageUrl || p.image || "",
+        photo_url: p.photo_url || p.photoUrl || p.imageUrl || p.image || "",
         description: p.description || "",
         in_stock: p.in_stock !== false,
         is_sale: Boolean(p.is_sale),
@@ -525,7 +530,7 @@ export async function getAllProducts(): Promise<any[]> {
 
       const city = String(product.city || vendorData.city || merchant?.city || "Nigeria");
       const state = String(product.state || vendorData.state || merchant?.state || "Nigeria");
-      const photo = product.photo_url || product.imageUrl || product.image || product.photo || "";
+      const photo = product.photo_url || product.photoUrl || product.imageUrl || product.image || product.photo || "";
       productIds.add(id);
       all.push({
         id,
@@ -838,7 +843,7 @@ router.get("/api/v1/vendors/:slug/products", async (req: Request, res: Response)
       title: p.title || p.name,
       price_naira: Number(p.price_naira || p.price || 0),
       formatted_price: p.formatted_price || formatPrice(Number(p.price_naira || p.price || 0)),
-      photo_url: p.photo_url || p.imageUrl || "https://images.unsplash.com/photo-1517336714731-489689fd1ca8?auto=format&fit=crop&w=800&q=80",
+      photo_url: p.photo_url || p.photoUrl || p.imageUrl || "https://images.unsplash.com/photo-1517336714731-489689fd1ca8?auto=format&fit=crop&w=800&q=80",
       description: p.description || "",
       in_stock: p.in_stock !== false,
       is_sale: Boolean(p.is_sale),
@@ -1699,11 +1704,7 @@ router.delete("/api/v1/saved-shops/:vendor_id", (req: Request, res: Response) =>
 // ----------------------------------------------------
 // 23. Verification & Admin Management Proxy Endpoints
 // ----------------------------------------------------
-const BACKEND_BASE = (
-  process.env.FLOATE_API_BASE_URL ||
-  process.env.VITE_API_BASE_URL ||
-  "https://floate-v2-backend-original.onrender.com"
-).replace(/\/+$/, "");
+const BACKEND_BASE = (process.env.FLOATE_UPSTREAM_BACKEND_URL || "").replace(/\/+$/, "");
 
 router.get(["/verify/session", "/api/v1/verify/session"], async (req: Request, res: Response) => {
   const token = req.query.token as string;
@@ -1784,7 +1785,7 @@ router.post("/api/v1/payments/flutterwave/checkout", async (req: Request, res: R
     return res.status(400).json({ success: false, message: "merchantPhone and packageId are required." });
   }
 
-  const liveBackendUrl = process.env.FLOATE_BACKEND_URL || "https://floate-v2-backend-original.onrender.com";
+  const liveBackendUrl = BACKEND_BASE;
 
   try {
     const remoteRes = await fetch(`${liveBackendUrl.replace(/\/+$/, "")}/api/v1/payments/flutterwave/checkout`, {
@@ -1834,6 +1835,110 @@ router.post("/api/v1/payments/flutterwave/checkout", async (req: Request, res: R
 // ----------------------------------------------------
 // 25. WhatsApp 1-Click Deep-Link Auth Token Exchange
 // ----------------------------------------------------
+interface RegistrationOtpRecord {
+  code: string;
+  attempts: number;
+  expiresAt: number;
+}
+
+router.post(["/api/v1/auth/whatsapp/request-code", "/api/auth/whatsapp/request-code"], async (req: Request, res: Response) => {
+  const phone = String(req.body?.phone || req.body?.phoneNumber || "").trim();
+  if (!phone) return res.status(400).json({ success: false, error: "Phone number is required." });
+  if (!isWhatsAppAuthConfigured()) {
+    return res.status(503).json({ success: false, error: "WhatsApp login is not fully configured on this backend." });
+  }
+
+  try {
+    const challenge = await whatsappAuthService.requestAuthCode(phone, req.ip || req.socket.remoteAddress || "unknown");
+    return res.json({ success: true, ...challenge });
+  } catch (error: any) {
+    const status = /rate limit/i.test(error.message || "") ? 429 : 400;
+    return res.status(status).json({ success: false, error: error.message || "WhatsApp authentication could not be started." });
+  }
+});
+
+router.get(["/api/v1/auth/whatsapp/session-status", "/api/auth/whatsapp/session-status"], async (req: Request, res: Response) => {
+  const code = String(req.query.code || "").trim();
+  if (!code) return res.status(400).json({ success: false, authenticated: false, error: "Challenge code is required." });
+
+  try {
+    const session = await whatsappAuthService.getSessionStatus(code);
+    return res.json({ success: true, ...session });
+  } catch (error: any) {
+    return res.status(503).json({ success: false, authenticated: false, error: error.message || "WhatsApp session status is unavailable." });
+  }
+});
+
+router.post(["/api/auth/whatsapp/send-otp", "/auth/whatsapp/send-otp"], async (req: Request, res: Response) => {
+  const phone = String(req.body?.phoneNumber || req.body?.phone || "").trim();
+  if (!phone) return res.status(400).json({ success: false, error: "Phone number is required." });
+  if (!isWhatsAppConfigured()) {
+    return res.status(503).json({ success: false, error: "WhatsApp delivery is not configured on this backend." });
+  }
+
+  try {
+    const { canonical } = formatPhoneNumber(phone);
+    if (!canonical) return res.status(400).json({ success: false, error: "A valid phone number is required." });
+
+    const clientIp = req.ip || req.socket.remoteAddress || "unknown";
+    const rateLimit = await redisService.checkRateLimit(`registration_otp:${clientIp}:${canonical}`, 3, 900);
+    if (!rateLimit.allowed) return res.status(429).json({ success: false, error: "Too many verification codes requested. Try again later." });
+
+    const key = `registration_otp:${canonical}`;
+    const record: RegistrationOtpRecord = {
+      code: String(randomInt(1000, 10000)),
+      attempts: 0,
+      expiresAt: Date.now() + 10 * 60 * 1000
+    };
+    if (!await redisService.set(key, record, 600)) {
+      return res.status(503).json({ success: false, error: "Could not store the verification code." });
+    }
+
+    const delivered = await sendWhatsAppMessage(canonical, `Your Floate registration verification code is ${record.code}. It expires in 10 minutes.`);
+    if (!delivered) {
+      await redisService.del(key);
+      return res.status(502).json({ success: false, error: "WhatsApp could not deliver the verification code." });
+    }
+
+    return res.json({ success: true, phone: canonical, message: "Verification code sent to WhatsApp." });
+  } catch (error: any) {
+    return res.status(502).json({ success: false, error: error.message || "WhatsApp could not deliver the verification code." });
+  }
+});
+
+router.post(["/api/auth/whatsapp/verify", "/auth/whatsapp/verify"], async (req: Request, res: Response) => {
+  const phone = String(req.body?.phoneNumber || req.body?.phone || "").trim();
+  const code = String(req.body?.otp || req.body?.code || "").trim();
+  if (!phone || !/^\d{4}$/.test(code)) {
+    return res.status(400).json({ success: false, error: "Phone number and four-digit code are required." });
+  }
+
+  try {
+    const { canonical } = formatPhoneNumber(phone);
+    const key = `registration_otp:${canonical}`;
+    const record = await redisService.get<RegistrationOtpRecord>(key);
+    if (!record || record.expiresAt <= Date.now() || record.attempts >= 5) {
+      await redisService.del(key);
+      return res.status(400).json({ success: false, error: "Verification code is invalid or expired." });
+    }
+
+    const submitted = Buffer.from(code);
+    const expected = Buffer.from(record.code);
+    const isValid = submitted.length === expected.length && timingSafeEqual(submitted, expected);
+    if (!isValid) {
+      record.attempts += 1;
+      if (record.attempts >= 5) await redisService.del(key);
+      else await redisService.set(key, record, Math.ceil((record.expiresAt - Date.now()) / 1000));
+      return res.status(400).json({ success: false, error: "Verification code is invalid or expired." });
+    }
+
+    await redisService.del(key);
+    return res.json({ success: true, verified: true, message: "WhatsApp phone verified successfully." });
+  } catch (error: any) {
+    return res.status(503).json({ success: false, error: error.message || "Phone verification is unavailable." });
+  }
+});
+
 router.post(["/auth/whatsapp/exchange", "/api/v1/auth/whatsapp/exchange"], async (req: Request, res: Response) => {
   try {
     const { wa_token, token } = req.body;
@@ -1843,34 +1948,20 @@ router.post(["/auth/whatsapp/exchange", "/api/v1/auth/whatsapp/exchange"], async
       return res.status(400).json({ success: false, authenticated: false, error: "Token is required" });
     }
 
-    // Forward to remote backend if available
-    const liveBackendUrl = process.env.FLOATE_BACKEND_URL || "https://floate-v2-backend-original.onrender.com";
-    try {
-      const remoteRes = await fetch(`${liveBackendUrl.replace(/\/+$/, "")}/api/v1/auth/whatsapp/exchange`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ wa_token: activeToken })
-      });
+    const exchange = await whatsappAuthService.exchangeWhatsAppToken(String(activeToken));
+    if (!exchange.success || !exchange.token) {
+      return res.status(401).json({ success: false, authenticated: false, error: exchange.error || "WhatsApp token is invalid or expired." });
+    }
 
-      if (remoteRes.ok) {
-        const data = await remoteRes.json();
-        return res.json(data);
-      }
-    } catch (e) {}
-
-    // Fallback response for active token
     return res.json({
       success: true,
       authenticated: true,
-      token: `wa_jwt_${activeToken}`,
-      slug: "merchant",
-      vendor: {
-        id: "vendor_merchant",
-        slug: "merchant",
-        name: "Verified WhatsApp Merchant",
-        city: "Lagos",
-        verified: true
-      }
+      token: exchange.token,
+      refreshToken: exchange.refreshToken,
+      vendor: exchange.vendor,
+      slug: exchange.vendor?.slug || exchange.vendor?.businessName,
+      phone: exchange.phone,
+      order: exchange.order
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, authenticated: false, error: error.message });
@@ -1882,7 +1973,7 @@ router.post(["/auth/whatsapp/exchange", "/api/v1/auth/whatsapp/exchange"], async
 // ----------------------------------------------------
 router.get(["/api/v1/orders/:id", "/api/orders/:id"], async (req: Request, res: Response) => {
   const { id } = req.params;
-  const liveBackendUrl = process.env.FLOATE_BACKEND_URL || "https://floate-v2-backend-original.onrender.com";
+  const liveBackendUrl = BACKEND_BASE;
   try {
     const remoteRes = await fetch(`${liveBackendUrl.replace(/\/+$/, "")}/api/v1/orders/${encodeURIComponent(id)}`);
     if (remoteRes.ok) {

@@ -14,6 +14,10 @@ import { ANCHOR_BUSINESSES } from "./controllers/searchController";
 import { createMerchantSlug } from "./src/utils/merchantSlug";
 import { normalizeWhatsAppNumber } from "./src/utils/whatsapp";
 import { handleWhatsAppVerification, handleWhatsAppWebhook } from "./src/bot/services/whatsappService.js";
+import { firestoreDb as adStore } from "./src/bot/services/firestoreService.js";
+import { corsMiddleware } from "./src/config/cors.js";
+import { isVoiceTranscriptionConfigured, isWhatsAppAuthConfigured } from "./src/bot/config.js";
+import { getCatalogMedia } from "./src/bot/services/mediaStorageService.js";
 import { SEO_HUBS_DATA } from "./src/data/seoHubs";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch } from "firebase/firestore";
@@ -38,40 +42,111 @@ const requireAdminApiKey: express.RequestHandler = (req, res, next) => {
   }
   next();
 };
+app.use(corsMiddleware);
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
 app.get(["/whatsapp-webhook", "/api/whatsapp-webhook"], handleWhatsAppVerification);
 app.post(["/whatsapp-webhook", "/api/whatsapp-webhook"], handleWhatsAppWebhook);
+
+const listActiveAds: express.RequestHandler = async (_req, res) => {
+  try {
+    const ads = await adStore.getActiveBannerAds();
+    return res.json({ success: true, ads });
+  } catch (error: any) {
+    return res.status(503).json({ success: false, error: error.message || "Ads are unavailable." });
+  }
+};
+
+const trackAdEvent = (event: "view" | "click"): express.RequestHandler => async (req, res) => {
+  try {
+    const ad = await adStore.getAdDoc(req.params.id);
+    if (!ad) return res.status(404).json({ success: false, error: "Ad not found." });
+
+    const recorded = event === "view"
+      ? await adStore.recordAdImpression(req.params.id)
+      : await adStore.recordAdClick(req.params.id);
+    if (!recorded) return res.status(503).json({ success: false, error: "Ad event could not be recorded." });
+
+    return res.json({ success: true, recorded: true });
+  } catch (error: any) {
+    return res.status(503).json({ success: false, error: error.message || "Ad event could not be recorded." });
+  }
+};
+
+app.get(["/api/ads/banner", "/api/v1/ads/banner", "/api/v1/ads"], listActiveAds);
+app.post(["/api/ads/:id/view", "/api/v1/ads/:id/view"], trackAdEvent("view"));
+app.post(["/api/ads/:id/click", "/api/v1/ads/:id/click"], trackAdEvent("click"));
+
+app.get("/api/media/:mediaId", async (req, res) => {
+  try {
+    const media = await getCatalogMedia(req.params.mediaId);
+    if (!media) return res.status(404).json({ success: false, error: "Media not found." });
+    res.setHeader("Cache-Control", "public, max-age=86400, s-maxage=86400");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    return res.type(media.mimeType).send(media.buffer);
+  } catch (error: any) {
+    return res.status(500).json({ success: false, error: error.message || "Media could not be loaded." });
+  }
+});
+
 app.use(v1Router);
 app.use(searchRouter);
 
-const REMOTE_BACKEND = process.env.FLOATE_BACKEND_URL || process.env.VITE_FLOATE_BACKEND_URL || "https://floate-v2-backend-original.onrender.com";
+const REMOTE_BACKEND = (process.env.FLOATE_UPSTREAM_BACKEND_URL || "").replace(/\/+$/, "");
 
 // Health and handshake endpoints
+const API_CAPABILITIES = [
+  "api.v1.home",
+  "api.v1.search",
+  "catalog.products",
+  "catalog.merchants",
+  "search",
+  "ads.banner",
+  "ads.tracking",
+  "auth.registrationOtp",
+  "auth.whatsappChallenge",
+  "auth.whatsappExchange",
+  "voice.transcription"
+];
+
 app.get(["/api/handshake", "/handshake"], async (req, res) => {
   try {
-    const remoteRes = await fetch(`${REMOTE_BACKEND}/api/handshake`, {
-      headers: { Accept: "application/json" }
+    await Promise.all([
+      getDoc(doc(firestoreDb, "test", "connection")),
+      getDocs(collection(firestoreDb, "ads"))
+    ]);
+    const whatsappReady = isWhatsAppAuthConfigured();
+    const voiceReady = isVoiceTranscriptionConfigured();
+    const isReady = whatsappReady && voiceReady;
+    return res.status(isReady ? 200 : 503).json({
+      success: isReady,
+      handshake: isReady ? "SUCCESSFUL" : "DEGRADED",
+      service: "floate-v2-backend",
+      apiVersion: 1,
+      capabilities: API_CAPABILITIES,
+      checks: { api: true, firestore: true, adsStore: true, whatsapp: whatsappReady, voiceTranscription: voiceReady },
+      corsAllowed: Boolean(req.get("Origin")),
+      status: isReady ? "healthy" : "degraded",
     });
-    if (remoteRes.ok) {
-      const data = await remoteRes.json().catch(() => null);
-      return res.json({
-        success: true,
-        handshake: "SUCCESSFUL",
-        service: "floate-backend",
-        corsAllowed: true,
-        status: "healthy",
-        ...(data || {})
-      });
-    }
-  } catch (e) {}
-  res.json({
-    success: true,
-    handshake: "SUCCESSFUL",
-    service: "floate-backend",
-    corsAllowed: true,
-    status: "healthy"
-  });
+  } catch (error: any) {
+    return res.status(503).json({
+      success: false,
+      handshake: "FAILED",
+      service: "floate-v2-backend",
+      apiVersion: 1,
+      capabilities: API_CAPABILITIES,
+      checks: {
+        api: true,
+        firestore: false,
+        adsStore: false,
+        whatsapp: isWhatsAppAuthConfigured(),
+        voiceTranscription: isVoiceTranscriptionConfigured()
+      },
+      corsAllowed: Boolean(req.get("Origin")),
+      status: "degraded",
+      error: error.message || "Firestore connectivity check failed."
+    });
+  }
 });
 
 // Merchant Visual Verification Session Endpoint
@@ -144,27 +219,28 @@ app.post("/api/register/business", async (req, res) => {
   const intlPhone = cleanDigits.startsWith("0") ? "234" + cleanDigits.slice(1) : (cleanDigits.startsWith("234") ? cleanDigits : "234" + cleanDigits);
   const photo = selfieUrl || profilePhoto || "";
 
-  // 1. Forward to remote Render backend
-  try {
-    const remoteRes = await fetch(`${REMOTE_BACKEND}/api/register/business`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "x-api-key": process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6"
-      },
-      body: JSON.stringify(req.body)
-    });
-    const remoteData = await remoteRes.json().catch(() => null);
-    if (!remoteRes.ok || remoteData?.success !== true) {
-      return res.status(remoteRes.ok ? 502 : remoteRes.status).json(
-        remoteData || { success: false, error: "Backend returned an invalid registration response." }
-      );
+  if (REMOTE_BACKEND) {
+    try {
+      const remoteRes = await fetch(`${REMOTE_BACKEND}/api/register/business`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "x-api-key": process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6"
+        },
+        body: JSON.stringify(req.body)
+      });
+      const remoteData = await remoteRes.json().catch(() => null);
+      if (!remoteRes.ok || remoteData?.success !== true) {
+        return res.status(remoteRes.ok ? 502 : remoteRes.status).json(
+          remoteData || { success: false, error: "Backend returned an invalid registration response." }
+        );
+      }
+      return res.status(remoteRes.status).json(remoteData);
+    } catch (e) {
+      console.error("[Server] Configured upstream registration failed:", e);
+      return res.status(502).json({ success: false, error: "Registration backend is unavailable. Please retry." });
     }
-    return res.status(remoteRes.status).json(remoteData);
-  } catch (e) {
-    console.error("[Server] Remote registration failed; refusing to write an unsynchronized local copy:", e);
-    return res.status(502).json({ success: false, error: "Registration backend is unavailable. Please retry." });
   }
 
   // 2. Persist to Firestore: businesses collection, products collection, and verifications queue
@@ -389,24 +465,25 @@ app.post("/api/catalog/product", async (req, res) => {
     return res.status(400).json({ success: false, error: "A product name, valid merchant WhatsApp number, and positive price are required." });
   }
 
-  // 1. Forward to remote Render backend
-  try {
-    const remoteRes = await fetch(`${REMOTE_BACKEND}/api/catalog/product`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "x-api-key": process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6"
-      },
-      body: JSON.stringify(req.body)
-    });
-    if (remoteRes.ok) {
-      const data = await remoteRes.json();
-      if (data.success !== false) return res.json(data);
-      console.warn("[Server] Remote catalog rejected product; attempting shared Firestore persistence:", data.error || data.message);
+  if (REMOTE_BACKEND) {
+    try {
+      const remoteRes = await fetch(`${REMOTE_BACKEND}/api/catalog/product`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "x-api-key": process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6"
+        },
+        body: JSON.stringify(req.body)
+      });
+      if (remoteRes.ok) {
+        const data = await remoteRes.json();
+        if (data.success !== false) return res.json(data);
+        console.warn("[Server] Configured upstream rejected product; attempting shared Firestore persistence:", data.error || data.message);
+      }
+    } catch (e) {
+      console.warn("[Server] Configured upstream unavailable; attempting Firestore persistence:", e);
     }
-  } catch (e) {
-    console.warn("[Server] Remote add product failed; attempting Firestore persistence:", e);
   }
 
   // 2. Persist to shared Firestore and associate the listing with its merchant record.
@@ -588,30 +665,46 @@ app.patch("/api/catalog/product/:id/condition", async (req, res) => {
 
 // Proxy for /api/catalog/products and /api/catalog/statuses if called locally
 app.get("/api/catalog/products", async (req, res) => {
+  if (REMOTE_BACKEND) {
+    try {
+      const qs = new URLSearchParams(req.query as any).toString();
+      const remote = await fetch(`${REMOTE_BACKEND}/api/catalog/products?${qs}`, {
+        headers: { Accept: "application/json" }
+      });
+      if (remote.ok) {
+        const data = await remote.json();
+        return res.json(data);
+      }
+    } catch (err) {}
+  }
+
   try {
-    const qs = new URLSearchParams(req.query as any).toString();
-    const remote = await fetch(`${REMOTE_BACKEND}/api/catalog/products?${qs}`, {
-      headers: { Accept: "application/json" }
-    });
-    if (remote.ok) {
-      const data = await remote.json();
-      return res.json(data);
-    }
-  } catch (err) {}
-  res.status(502).json({ success: false, error: "Failed to reach catalog service" });
+    const products = await fetchBackendInventory();
+    return res.json({ success: true, count: products.length, products });
+  } catch (error: any) {
+    return res.status(503).json({ success: false, error: error.message || "Catalog is unavailable." });
+  }
 });
 
 app.get("/api/catalog/statuses", async (req, res) => {
+  if (REMOTE_BACKEND) {
+    try {
+      const remote = await fetch(`${REMOTE_BACKEND}/api/catalog/statuses`, {
+        headers: { Accept: "application/json" }
+      });
+      if (remote.ok) {
+        const data = await remote.json();
+        return res.json(data);
+      }
+    } catch (err) {}
+  }
+
   try {
-    const remote = await fetch(`${REMOTE_BACKEND}/api/catalog/statuses`, {
-      headers: { Accept: "application/json" }
-    });
-    if (remote.ok) {
-      const data = await remote.json();
-      return res.json(data);
+    const statuses = await fetchBackendStatuses();
+    return res.json({ success: true, count: statuses.length, statuses });
+  } catch (error: any) {
+    return res.status(503).json({ success: false, error: error.message || "Statuses are unavailable." });
     }
-  } catch (err) {}
-  res.json({ success: true, count: 0, statuses: [] });
 });
 
 function buildMerchantPayload(matchedVendor: any, rawParam: string = "") {
@@ -660,6 +753,10 @@ function buildMerchantPayload(matchedVendor: any, rawParam: string = "") {
     coordinates: matchedVendor.coordinates || null,
     city: matchedVendor.city || "Lagos",
     state: matchedVendor.state || "Nigeria",
+    ownerName: matchedVendor.ownerName || matchedVendor.ownerFullName || "",
+    ownerFullName: matchedVendor.ownerFullName || matchedVendor.ownerName || "",
+    businessAddress: matchedVendor.businessAddress || matchedVendor.addressDetail || matchedVendor.stallAddress || "",
+    marketHub: matchedVendor.marketHub || matchedVendor.marketLocation || "",
     whatsappNumber: intlPhone,
     whatsapp: intlPhone,
     phone: intlPhone,
@@ -1316,7 +1413,7 @@ app.get("/api/catalog/vendor/:phone/products", async (req, res) => {
         price_naira: price,
         price,
         formatted_price: product.formatted_price || `₦${price.toLocaleString()}`,
-        photo_url: product.photo_url || product.imageUrl || "",
+        photo_url: product.photo_url || product.photoUrl || product.imageUrl || "",
         businessName,
         merchantSlug,
         vendorPhone: merchantPhone,
@@ -1517,10 +1614,12 @@ const searchCache = new Map<string, { data: any; timestamp: number }>();
 const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // Background keep-alive for Floate API backend
-const API_URL = process.env.FLOATE_SEARCH_API_URL || "https://floate-v2-backend-original.onrender.com/api/search";
+const API_URL = process.env.FLOATE_SEARCH_API_URL ||
+  (REMOTE_BACKEND ? `${REMOTE_BACKEND}/api/search` : "");
 const API_KEY = process.env.FLOATE_SEARCH_API_KEY || "floate_live_sk_7f8a92b3c4e5d6";
 
 const warmUpExternalApi = async () => {
+  if (!API_URL) return;
   try {
     const ctrl = new AbortController();
     const to = setTimeout(() => ctrl.abort(), 10000);
@@ -3306,7 +3405,7 @@ app.post("/api/storefront/products/:id/boost", (req, res) => {
 });
 
 // FLOATE BOT & COMMERCE API INTEGRATION
-const FLOATE_API_BASE_URL = process.env.FLOATE_API_BASE_URL || "https://floate-v2-backend-original.onrender.com";
+const FLOATE_API_BASE_URL = (process.env.FLOATE_UPSTREAM_BACKEND_URL || "").replace(/\/+$/, "");
 const FLOATE_API_KEY = process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6";
 
 function formatWhatsAppBuyLink(phone: string, merchantName: string, productTitle: string, price?: number | string) {

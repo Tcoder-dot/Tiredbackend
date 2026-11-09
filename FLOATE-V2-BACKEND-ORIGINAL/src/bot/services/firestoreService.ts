@@ -1,4 +1,4 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
+limport { initializeApp, getApps, getApp } from 'firebase/app';
 import { InlineKeyboard } from 'grammy';
 import {
   getFirestore,
@@ -11,6 +11,8 @@ import {
   query,
   where,
   limit,
+  increment,
+  writeBatch,
   runTransaction,
 } from 'firebase/firestore';
 import fs from 'fs';
@@ -208,6 +210,7 @@ export interface MerchantDoc {
   videoVerified?: boolean;
   verificationStatus?: string;
   verificationReason?: string;
+  slug?: string;
   marketHub?: string;
   shopAddress?: string;
   businessModel?: 'physical_stall' | 'dropshipper_online' | string;
@@ -869,6 +872,31 @@ export class FirestoreService {
     );
   }
 
+  private async findBusinessProfile(phoneInput: string): Promise<{ id: string; data: any } | null> {
+    const variants = Array.from(new Set([
+      normalizePhone(phoneInput),
+      ...getAllPhoneVariants(phoneInput),
+    ].filter(Boolean))).slice(0, 10);
+    if (variants.length === 0) return null;
+
+    for (const field of ['whatsapp', 'whatsappNumber', 'phone']) {
+      try {
+        const snapshot = await getDocs(query(
+          collection(db, 'businesses'),
+          where(field, 'in', variants)
+        ));
+        if (!snapshot.empty) {
+          const business = snapshot.docs[0];
+          return { id: business.id, data: business.data() };
+        }
+      } catch (error) {
+        console.warn(`[Firestore] Business profile lookup by ${field} failed:`, error);
+      }
+    }
+
+    return null;
+  }
+
   /**
    * Retrieves a merchant by ID, WhatsApp number (any format), or Business Name.
    * Auto-consolidates multiple variant documents (e.g. 0706... and 23470...) to prevent split credit balances.
@@ -910,6 +938,42 @@ export class FirestoreService {
               }
               if (docsFound.length > 0) break;
             } catch (err) {}
+          }
+        }
+
+        if (docsFound.length === 0) {
+          const businessProfile = await this.findBusinessProfile(key);
+          if (businessProfile) {
+            const business = businessProfile.data;
+            const businessName = business.businessName || business.name || `Merchant ${key.slice(-4)}`;
+            const whatsapp = business.whatsapp || business.whatsappNumber || business.phone || key;
+            const verificationStatus = String(
+              business.verificationStatus || business.verification_status || ''
+            ).toUpperCase();
+            const isVerified = business.isVerified === true || business.verified === true ||
+              verificationStatus === 'APPROVED' || verificationStatus === 'VERIFIED';
+
+            return {
+              id: businessProfile.id,
+              slug: business.slug || normalizePhone(whatsapp) || businessProfile.id,
+              businessName,
+              ownerFullName: business.ownerName || business.ownerFullName || '',
+              whatsapp,
+              userId: business.userId || business.ownerId || whatsapp,
+              state: business.state || 'Nigeria',
+              city: business.city || 'Nigeria',
+              category: business.category || business.primaryCategory || 'General Merchandise',
+              description: business.description || business.bio || '',
+              product: business.product || business.initialProduct?.name,
+              products: Array.isArray(business.products) ? business.products : [],
+              profilePhotoUrl: business.profilePhotoUrl || business.avatarUrl || business.selfieUrl || '',
+              verifiedStatus: (business.verifiedStatus || (isVerified ? 'YES' : 'PENDING')) as MerchantDoc['verifiedStatus'],
+              verificationStatus: business.verificationStatus || (isVerified ? 'APPROVED' : 'PENDING_REVIEW'),
+              isVerified,
+              credit_balance: Number(business.credit_balance ?? business.credits ?? this.defaultInitialCredits),
+              status: (business.status || (isVerified ? 'ACTIVE' : 'PENDING_REVIEW')) as MerchantDoc['status'],
+              updatedAt: business.updatedAt || business.createdAt || new Date().toISOString(),
+            };
           }
         }
 
@@ -955,7 +1019,6 @@ export class FirestoreService {
             verificationStatus: matchingListing.isVerified === true || matchingListing.verifiedStatus === 'YES' ? 'APPROVED' : 'PENDING_REVIEW',
             status: matchingListing.isVerified === true || matchingListing.verifiedStatus === 'YES' ? 'ACTIVE' : 'PENDING_REVIEW',
             credit_balance: startingCredits,
-            status: 'ACTIVE',
             updatedAt: new Date().toISOString(),
           };
 
@@ -1968,15 +2031,20 @@ export class FirestoreService {
     const prodId = `prod-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const numPrice = parsePriceToNumber(data.price) || 0;
     const currentMerchant = await this.getMerchant(data.whatsapp);
-    const isVerified = currentMerchant ? currentMerchant.isVerified === true : true;
-    const verificationStatus = currentMerchant?.verificationStatus || (isVerified ? 'APPROVED' : 'PENDING_REVIEW');
+    if (!currentMerchant) {
+      throw new Error('Register your merchant profile before adding products.');
+    }
 
-    if (currentMerchant) {
-      const currentProducts = await this.getProductsByMerchant(data.whatsapp);
-      const productLimit = isVerified ? 7 : 2;
-      if (currentProducts.length >= productLimit) {
-        throw new Error(`PRODUCT_LIMIT_REACHED:${productLimit}`);
-      }
+    if (currentMerchant.status === 'REJECTED') {
+      throw new Error('Rejected merchant accounts cannot publish products.');
+    }
+
+    const isVerified = currentMerchant.isVerified === true;
+    const verificationStatus = currentMerchant.verificationStatus || (isVerified ? 'APPROVED' : 'PENDING_REVIEW');
+    const currentProducts = await this.getProductsByMerchant(data.whatsapp);
+    const productLimit = isVerified ? 7 : 2;
+    if (currentProducts.length >= productLimit) {
+      throw new Error(`PRODUCT_LIMIT_REACHED:${productLimit}`);
     }
 
     const prodDoc: ProductDoc = {
@@ -2004,40 +2072,67 @@ export class FirestoreService {
     };
 
     try {
-      // 1. Save directly to Firestore 'products' collection
-      await setDoc(doc(db, 'products', prodId), this.sanitizeForFirestore(prodDoc));
+      const businessProfile = await this.findBusinessProfile(data.whatsapp);
+      const business = businessProfile?.data || {};
+      const businessId = businessProfile?.id || `vendor_${normPhone || data.userId}`;
+      const businessSlug = business.slug || currentMerchant?.slug || normPhone;
+      const storefrontProduct = this.sanitizeForFirestore({
+        ...prodDoc,
+        title: prodDoc.product,
+        name: prodDoc.product,
+        price_naira: numPrice,
+        photo_url: prodDoc.photoUrl || '',
+        imageUrl: prodDoc.photoUrl || '',
+        vendorPhone: prodDoc.whatsapp,
+        whatsappNumber: prodDoc.whatsapp,
+        vendorName: prodDoc.businessName,
+        merchantSlug: businessSlug,
+        vendorSlug: businessSlug,
+        vendorId: businessId,
+        in_stock: true,
+        vendor: {
+          slug: businessSlug,
+          name: prodDoc.businessName,
+          city: prodDoc.city,
+          state: prodDoc.state,
+          verified: isVerified,
+          isVerified,
+          whatsapp_number: prodDoc.whatsapp,
+        },
+      });
+      const existingProducts = Array.isArray(business.products) ? business.products : [];
+      const updatedProducts = [
+        storefrontProduct,
+        ...existingProducts.filter((product: any) => product?.id !== prodId),
+      ];
+      const now = new Date().toISOString();
+      const businessRecord = this.sanitizeForFirestore({
+        ...business,
+        id: business.id || businessId,
+        slug: businessSlug,
+        businessName: business.businessName || data.businessName || '',
+        name: business.name || business.businessName || data.businessName || '',
+        ownerName: business.ownerName || currentMerchant?.ownerFullName || '',
+        whatsapp: business.whatsapp || data.whatsapp,
+        whatsappNumber: business.whatsappNumber || data.whatsapp,
+        phone: business.phone || data.whatsapp,
+        state: data.state || business.state || '',
+        city: data.city || business.city || '',
+        category: data.category || business.category || 'General',
+        primaryCategory: data.category || business.primaryCategory || business.category || 'General',
+        verified: business.verified ?? isVerified,
+        isVerified: business.isVerified ?? isVerified,
+        verificationStatus: business.verificationStatus || verificationStatus,
+        verification_status: business.verification_status || verificationStatus,
+        products: updatedProducts,
+        createdAt: business.createdAt || now,
+        updatedAt: now,
+      });
 
-      // 2. Ensure Merchant profile document in Firestore is updated/created
-      const merchantRef = doc(db, 'merchants', normPhone);
-      const mSnap = await getDoc(merchantRef);
-      if (!mSnap.exists()) {
-        const newMerchant: MerchantDoc = {
-          id: normPhone,
-          businessName: data.businessName || '',
-          whatsapp: data.whatsapp || '',
-          userId: data.userId ?? '',
-          telegramId: data.userId ?? '',
-          claimDate: new Date().toISOString().split('T')[0],
-          verifiedStatus: 'YES',
-          state: data.state || '',
-          city: data.city || '',
-          category: data.category || '',
-          listingType: data.listingType || 'Product',
-          isVerified: true,
-          credit_balance: this.defaultInitialCredits,
-          status: 'ACTIVE',
-          updatedAt: new Date().toISOString(),
-        };
-        await setDoc(merchantRef, this.sanitizeForFirestore(newMerchant));
-      } else {
-        await updateDoc(merchantRef, this.sanitizeForFirestore({
-          businessName: data.businessName || '',
-          state: data.state || '',
-          city: data.city || '',
-          category: data.category || '',
-          updatedAt: new Date().toISOString(),
-        }));
-      }
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'products', prodId), storefrontProduct);
+      batch.set(doc(db, 'businesses', businessId), businessRecord, { merge: true });
+      await batch.commit();
 
       // Pending and rejected merchants stay out of the Sheets auto-verification path.
       if (!currentMerchant || (currentMerchant.status !== 'PENDING_REVIEW' && currentMerchant.status !== 'REJECTED')) {
@@ -2057,6 +2152,7 @@ export class FirestoreService {
 
     } catch (err) {
       console.error('[Firestore] Error saving product listing:', err);
+      throw err;
     }
 
     return prodDoc;
@@ -4967,32 +5063,28 @@ export class FirestoreService {
   /**
    * Record ad impression
    */
-  public async recordAdImpression(id: string): Promise<void> {
+  public async recordAdImpression(id: string): Promise<boolean> {
     try {
       const ref = doc(db, 'ads', id);
-      const snap = await getDoc(ref);
-      if (snap.exists()) {
-        const data = snap.data() as AdDoc;
-        await updateDoc(ref, { impressions: (data.impressions || 0) + 1 });
-      }
+      await updateDoc(ref, { impressions: increment(1) });
+      return true;
     } catch (e) {
       console.warn('[Firestore] recordAdImpression error:', e);
+      return false;
     }
   }
 
   /**
    * Record ad click
    */
-  public async recordAdClick(id: string): Promise<void> {
+  public async recordAdClick(id: string): Promise<boolean> {
     try {
       const ref = doc(db, 'ads', id);
-      const snap = await getDoc(ref);
-      if (snap.exists()) {
-        const data = snap.data() as AdDoc;
-        await updateDoc(ref, { clicks: (data.clicks || 0) + 1 });
-      }
+      await updateDoc(ref, { clicks: increment(1) });
+      return true;
     } catch (e) {
       console.warn('[Firestore] recordAdClick error:', e);
+      return false;
     }
   }
 

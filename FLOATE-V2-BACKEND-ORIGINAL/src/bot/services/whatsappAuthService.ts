@@ -69,7 +69,7 @@ function generateChallengeCode(): string {
   const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'; // Unambiguous characters
   let randomPart = '';
   for (let i = 0; i < 4; i++) {
-    randomPart += chars.charAt(Math.floor(Math.random() * chars.length));
+    randomPart += chars.charAt(crypto.randomInt(chars.length));
   }
   return `FL-${randomPart}`;
 }
@@ -81,7 +81,7 @@ export class WhatsAppAuthService {
     this.jwtSecret =
       process.env.FLOATE_JWT_SECRET ||
       process.env.JWT_SECRET ||
-      'floate_jwt_secret_key_2026_super_secure_vault';
+      '';
   }
 
   /**
@@ -109,6 +109,12 @@ export class WhatsAppAuthService {
       throw new Error('Invalid phone number format. Please provide a valid phone number.');
     }
 
+    const botPhone = process.env.WHATSAPP_AUTH_DESTINATION_PHONE || '';
+    const cleanBotPhone = botPhone.replace(/\D/g, '');
+    if (cleanBotPhone.length < 10) {
+      throw new Error('WhatsApp authentication destination is not configured.');
+    }
+
     // Generate unique challenge code
     let challengeCode = generateChallengeCode();
     let attempts = 0;
@@ -120,13 +126,6 @@ export class WhatsAppAuthService {
     const ttlSeconds = 300; // 5 minutes
     const nowMs = Date.now();
     const expiresAtMs = nowMs + ttlSeconds * 1000;
-
-    const botPhone =
-      process.env.WHATSAPP_PHONE_NUMBER ||
-      process.env.ADMIN_WHATSAPP_PHONE ||
-      config.adminWhatsAppPhone ||
-      '2348000000000';
-    const cleanBotPhone = botPhone.replace(/\D/g, '');
 
     const authMsg = `AUTH: ${challengeCode}`;
     const waLink = `https://wa.me/${cleanBotPhone}?text=${encodeURIComponent(authMsg)}`;
@@ -232,6 +231,14 @@ export class WhatsAppAuthService {
     }
 
     const { e164: senderE164, canonical: senderCanonical } = formatPhoneNumber(senderPhone);
+    const requestedCanonical = formatPhoneNumber(session.phone).canonical;
+    if (requestedCanonical !== senderCanonical) {
+      return {
+        handled: true,
+        challengeCode: extractedCode,
+        replyMessage: '⚠️ Send this authentication code from the same WhatsApp number you entered on FLOATE.',
+      };
+    }
 
     // Retrieve merchant profile from Firestore
     let vendor = await firestoreDb.getMerchant(senderCanonical);
@@ -310,6 +317,7 @@ export class WhatsAppAuthService {
       refreshToken: refreshToken,
       vendor: {
         id: vendor.id,
+        slug: vendor.slug || senderCanonical,
         businessName: vendor.businessName || 'Verified Merchant',
         ownerFullName: vendor.ownerFullName || vendor.businessName || 'Verified Merchant',
         whatsapp: vendor.whatsapp || senderCanonical,

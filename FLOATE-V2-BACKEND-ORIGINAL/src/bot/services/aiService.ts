@@ -17,43 +17,6 @@ function getAIClient(): GoogleGenAI | null {
   });
 }
 
-export async function transcribeAudioWithWhisper(audioBuffer: Buffer, mimeType = 'audio/ogg'): Promise<string> {
-  const apiKey = config.openaiApiKey || process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error('OPENAI_API_KEY is not configured');
-  if (!audioBuffer.length) throw new Error('No audio data received');
-  if (audioBuffer.length > 25 * 1024 * 1024) throw new Error('Audio exceeds the 25 MB transcription limit');
-
-  const cleanMime = mimeType.split(';')[0].trim().toLowerCase() || 'audio/ogg';
-  const extension = cleanMime.includes('ogg') || cleanMime.includes('opus') ? 'ogg'
-    : cleanMime.includes('webm') ? 'webm'
-    : cleanMime.includes('wav') ? 'wav'
-    : cleanMime.includes('flac') ? 'flac'
-    : cleanMime.includes('mpeg') || cleanMime.includes('mp3') ? 'mp3'
-    : cleanMime.includes('mp4') || cleanMime.includes('m4a') ? 'm4a'
-    : 'ogg';
-
-  const formData = new FormData();
-  formData.append('file', new Blob([Uint8Array.from(audioBuffer)], { type: cleanMime }), `voice.${extension}`);
-  formData.append('model', 'whisper-1');
-  formData.append('response_format', 'json');
-
-  const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: formData,
-    signal: AbortSignal.timeout(60_000),
-  });
-
-  if (!response.ok) {
-    throw new Error(`OpenAI Whisper returned HTTP ${response.status}`);
-  }
-
-  const result = await response.json() as { text?: unknown };
-  const transcript = typeof result.text === 'string' ? result.text.trim() : '';
-  if (!transcript) throw new Error('OpenAI Whisper returned an empty transcript');
-  return transcript;
-}
-
 /**
  * Sanitizes and validates image MIME types for the Google GenAI multimodal API
  */
@@ -312,6 +275,7 @@ export type InboundIntentType =
   | 'MERCHANT_SPONSOR_PRODUCTS'
   | 'REFERRAL_PROGRAM'
   | 'BROWSE_MARKETS'
+  | 'CLARIFICATION_REQUIRED'
   | 'BUYER_SEARCH';
 
 export interface NaturalLanguageSafePayDeal {
@@ -672,7 +636,8 @@ Classify the message into EXACTLY ONE of the following intents:
 - "LOCATION_CHANGE": Asking to change, update, or switch default shopping location/city (e.g., "change my location to Lagos", "update my city", "set location Abuja").
 - "BROWSE_MARKETS": Asking to explore market hubs (e.g., "browse markets", "show markets in Lagos", "view onitsha markets").
 - "RESET_OR_HOME": Requesting to cancel, reset, start over, or go to main menu.
-- "BUYER_SEARCH": The user is searching to buy, find, order, or hire a product, item, service, or professional (e.g., "leather shoes in Onitsha", "iPhone 13", "I need a lawyer", "hire video editor", "solar inverter 200k", selecting a vendor number or business name).
+- "BUYER_SEARCH": The user clearly intends to find, buy, order, or hire something, including a recognizable product-only query (e.g., "leather shoes in Onitsha", "iPhone 13", "I need a lawyer", "hire video editor", "solar inverter 200k", selecting a vendor number or business name).
+- "CLARIFICATION_REQUIRED": The intent is unclear, the message is unrelated to Floate, or a typo/fragment does not clearly express a Floate action or shopping query.
 
 CRITICAL RULES:
 1. "I want to sponsor my products", "sponsor my product", "promote my products" -> ALWAYS MERCHANT_SPONSOR_PRODUCTS (NEVER BUYER_SEARCH).
@@ -690,12 +655,13 @@ CRITICAL RULES:
 13. Vendor names, vendor numbers (1-10), clicking a vendor button, or connecting to a store from search results is ALWAYS BUYER_SEARCH (NEVER MERCHANT_PORTAL).
 14. ONLY classify as MERCHANT_PORTAL when the user is explicitly asking to manage, view, or register their OWN seller account.
 15. A standalone price number (e.g. "10000", "₦10,000", "25k"), product name, or product update (e.g. "edit Chelsea boots to 10000", "change price to 10k") is NEVER SAFEPAY_DEAL_CREATE unless there is an explicit request for SafePay, escrow, or Pay on Delivery.
+16. Never classify unrelated conversation or unclear fragments as BUYER_SEARCH. Use CLARIFICATION_REQUIRED unless the user clearly asks to shop, buy, hire, or connect to a vendor.
 
 User message: "${text}"
 
 Output strictly a JSON object matching:
 {
-  "intent": "SAFEPAY_DEAL_CREATE" | "GREETING" | "SMALL_TALK" | "BRAND_QUESTION" | "SAFETY_OR_ESCROW_INFO" | "HELP_OR_SUPPORT" | "REPORT_VENDOR" | "MERCHANT_BANK_SETUP" | "MERCHANT_PORTAL" | "MERCHANT_STATS" | "MERCHANT_SPONSOR_PRODUCTS" | "MERCHANT_ADD_PRODUCT" | "MERCHANT_EDIT_CATALOG" | "LOCATION_CHANGE" | "BROWSE_MARKETS" | "RESET_OR_HOME" | "BUYER_SEARCH",
+  "intent": "SAFEPAY_DEAL_CREATE" | "GREETING" | "SMALL_TALK" | "BRAND_QUESTION" | "SAFETY_OR_ESCROW_INFO" | "HELP_OR_SUPPORT" | "REPORT_VENDOR" | "MERCHANT_BANK_SETUP" | "MERCHANT_PORTAL" | "MERCHANT_STATS" | "MERCHANT_SPONSOR_PRODUCTS" | "MERCHANT_ADD_PRODUCT" | "MERCHANT_EDIT_CATALOG" | "LOCATION_CHANGE" | "BROWSE_MARKETS" | "RESET_OR_HOME" | "BUYER_SEARCH" | "CLARIFICATION_REQUIRED",
   "confidence": 0.95,
   "cleanProduct": "extracted product name if BUYER_SEARCH or null",
   "location": "extracted location if mentioned or null"
@@ -710,6 +676,11 @@ Output strictly a JSON object matching:
       const parsed = JSON.parse(cleanJson);
 
       if (parsed && parsed.intent) {
+        const confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0;
+        if (parsed.intent === 'BUYER_SEARCH' && confidence < 0.7) {
+          return { intent: 'CLARIFICATION_REQUIRED', confidence, rawText: text };
+        }
+
         let extractedCommerceQuery: ParsedCommerceQuery | undefined = undefined;
         let extractedSafePayDeal: NaturalLanguageSafePayDeal | undefined = undefined;
 
@@ -721,7 +692,7 @@ Output strictly a JSON object matching:
 
         const result: InboundClassificationResult = {
           intent: parsed.intent as InboundIntentType,
-          confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.95,
+          confidence: confidence || 0.95,
           extractedQuery: extractedCommerceQuery,
           extractedSafePayDeal,
           extractedLocation: parsed.location || (extractedCommerceQuery ? extractedCommerceQuery.targetSellerLocation : null),
@@ -879,13 +850,10 @@ function fallbackIntentClassifier(text: string, lower: string): InboundClassific
     return { intent: 'BROWSE_MARKETS', confidence: 0.95, rawText: text };
   }
 
-  // 11. Fallback to Buyer Commerce Search ONLY when none of the above matched
-  const parsedFallback = fallbackQueryParse(text);
+  // Unknown text should not trigger a search without a clear shopping intent.
   return {
-    intent: 'BUYER_SEARCH',
-    confidence: 0.88,
-    extractedQuery: parsedFallback,
-    extractedLocation: parsedFallback.targetSellerLocation,
+    intent: 'CLARIFICATION_REQUIRED',
+    confidence: 0.5,
     rawText: text,
   };
 }
@@ -1268,20 +1236,16 @@ export async function transcribeAndAnalyzeAudio(audioBuffer: Buffer, mimeType: s
   if (!audioBuffer || audioBuffer.length === 0) {
     return { transcript: '', analysis: 'No audio data received.' };
   }
+  if (audioBuffer.length > 20 * 1024 * 1024) {
+    return { transcript: '', analysis: 'Voice note exceeds the Gemini transcription size limit.' };
+  }
 
   const cleanMime = sanitizeAudioMimeTypeForGemini(mimeType);
   const ai = getAIClient();
   if (!ai) {
-    console.warn('[Voice AI] Gemini API key not configured or AI client unavailable. Using simulated voice recognition.');
-    const sampleText = audioBuffer.toString('utf8', 0, 100);
-    const simulatedTranscript = sampleText.includes('sandal') || sampleText.includes('shoe') 
-      ? 'I want leather slippers 10k Onitsha' 
-      : 'Find verified solar inverters in Alaba Lagos';
-    const parsed = await parseShoppingQuery(simulatedTranscript);
     return {
-      transcript: simulatedTranscript,
-      analysis: 'Voice recognized successfully (Offline / Dev mode)',
-      parsedQuery: parsed,
+      transcript: '',
+      analysis: 'Gemini voice transcription is not configured.',
     };
   }
 
@@ -2776,20 +2740,21 @@ Floate's Brand Identity & Capabilities:
 - Allows merchants to list products, manage inventory, and receive direct buyer leads.
 
 Instructions:
-1. Respond warmly, naturally, and conversationally in 2 to 4 concise sentences.
-2. Maintain an authentic Nigerian warmth (refined English with natural warmth, polite, friendly, never robotic or canned).
-3. Do NOT mention SafePay or escrow services in the general greeting.
-4. If the user only said a general greeting (e.g., "Hello", "Hi", "Hello Floate", "Good morning", "Hey", "Good day") WITHOUT asking how you are doing:
+1. Stay strictly within Floate's marketplace, merchant tools, WhatsApp flows, and documented FAQs. Do not answer unrelated general-knowledge or personal-advice questions; briefly explain that you can help with Floate and ask which Floate task they need.
+2. Respond warmly, naturally, and conversationally in 2 to 4 concise sentences.
+3. Maintain an authentic Nigerian warmth (refined English with natural warmth, polite, friendly, never robotic or canned).
+4. Do NOT mention SafePay or escrow services in the general greeting.
+5. If the user only said a general greeting (e.g., "Hello", "Hi", "Hello Floate", "Good morning", "Hey", "Good day") WITHOUT asking how you are doing:
    - Do NOT say "I am doing wonderful" and do NOT say "thank you for asking" (because no question was asked).
    - Instead, greet them warmly and ask how they are, introduce yourself and how you can help:
      "Hello ${cleanName || 'Shopper'}, how are you today?
 I am Floate, your reliable assistant for connecting directly with verified sellers and artisans across Nigeria. Whether you are looking to shop for quality items or you want to list your own products, I am here to help. How can I help you today?"
-5. ONLY if the user EXPLICITLY asked how you are doing (e.g., "how are you", "how far", "how you dey", "how are you doing"):
+6. ONLY if the user EXPLICITLY asked how you are doing (e.g., "how are you", "how far", "how you dey", "how are you doing"):
    - Respond warmly with:
      "Hello ${cleanName || 'Shopper'}! I am doing wonderful, thank you for asking. I am Floate, your reliable assistant for connecting directly with verified sellers and artisans across Nigeria. Whether you are looking to shop for quality items or you want to list your own products, I am here to help. How can I help you today?"
-6. Do NOT arbitrarily name-drop specific Lagos markets like Computer Village or Alaba unless the user's location is actually Lagos or they asked about electronics. Refer generally to "markets and verified sellers across Nigeria" or specifically to their city "${userCity || 'Nigeria'}".
-7. If they asked what Floate is or does, explain Floate's purpose cleanly and invite them to search or list their shop.
-8. Do NOT use decorative emojis (no stars, rocket emojis, or excessive icons). Use WhatsApp single asterisks (*bold*) for emphasis if needed.
+7. Do NOT arbitrarily name-drop specific Lagos markets like Computer Village or Alaba unless the user's location is actually Lagos or they asked about electronics. Refer generally to "markets and verified sellers across Nigeria" or specifically to their city "${userCity || 'Nigeria'}".
+8. If they asked what Floate is or does, explain Floate's purpose cleanly and invite them to search or list their shop.
+9. Do NOT use decorative emojis (no stars, rocket emojis, or excessive icons). Use WhatsApp single asterisks (*bold*) for emphasis if needed.
 
 Generate the exact message to send to the user:`;
 

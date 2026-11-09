@@ -34,17 +34,7 @@ async function safeFetch(path: string, options?: RequestInit): Promise<Response>
 
   const localUrl = path.startsWith("/api") ? path : `/api/v1${path.startsWith("/") ? path : "/" + path}`;
   
-  // 1. Try local Express server first (local Firestore & memory stores)
-  try {
-    const localRes = await fetch(localUrl, mergedOptions);
-    if ((localRes.ok || localRes.status === 409 || localRes.status === 402) && isJsonResponse(localRes)) {
-      return localRes;
-    }
-  } catch (err) {
-    console.warn(`[API] Local fetch to ${localUrl} failed, trying remote backend:`, err);
-  }
-
-  // 2. Fallback to remote backend
+  // Use the configured backend in deployed builds; prefer same-origin for local development.
   if (API_BASE) {
     const remoteUrl = `${API_BASE}${localUrl}`;
     try {
@@ -55,7 +45,15 @@ async function safeFetch(path: string, options?: RequestInit): Promise<Response>
     }
   }
 
-  // Final fallback to local
+  try {
+    const localRes = await fetch(localUrl, mergedOptions);
+    if ((localRes.ok || localRes.status === 409 || localRes.status === 402) && isJsonResponse(localRes)) {
+      return localRes;
+    }
+  } catch (err) {
+    console.warn(`[API] Local fetch to ${localUrl} failed:`, err);
+  }
+
   const fallbackRes = await fetch(localUrl, mergedOptions);
   if (!isJsonResponse(fallbackRes)) {
     throw new Error(`API route ${localUrl} returned non-JSON content.`);
@@ -152,6 +150,8 @@ export const api = {
           city: String(profile.city || "Nigeria"),
           state: String(profile.state || "Nigeria"),
           category: String(profile.category || "General Merchandise"),
+          ownerName: String(profile.ownerName || profile.ownerFullName || ""),
+          ownerFullName: String(profile.ownerFullName || profile.ownerName || ""),
           verified: profile.verified === true || profile.isVerified === true,
           isVerified: profile.verified === true || profile.isVerified === true,
           verificationStatus: String(profile.verificationStatus || (profile.isVerified || profile.verified ? "APPROVED" : "PENDING_REVIEW")),
@@ -165,11 +165,15 @@ export const api = {
           squareBoostUrl: profile.squareBoostUrl,
           location: profile.location || profile.marketLocation,
           stallAddress: profile.stallAddress,
+          businessAddress: profile.businessAddress || profile.addressDetail || profile.stallAddress || "",
+          marketHub: profile.marketHub || profile.marketLocation || "",
+          storeType: profile.storeType || "",
           avatar_url: profile.avatar_url || profile.avatarUrl || "",
           bio: profile.bio || profile.description || profile.product || "",
           whatsapp_number: String(
             profile.whatsapp_number || profile.whatsappNumber || profile.whatsapp || profile.vendorPhone || ""
-          )
+          ),
+          phone: String(profile.phone || profile.whatsappNumber || profile.whatsapp || profile.vendorPhone || "")
         }
       };
     };

@@ -6,7 +6,7 @@ import { clearSearchCache } from "./searchService";
  * Backend URL configuration
  * Vite / React: VITE_FLOATE_BACKEND_URL
  * Next.js: NEXT_PUBLIC_FLOATE_BACKEND_URL
- * Fallback: https://floate-v2-backend-original.onrender.com
+ * Fallback: same origin when no backend URL is configured
  */
 export const FLOATE_API_URL: string = FLOATE_BACKEND_URL;
 
@@ -55,6 +55,7 @@ export interface BackendProduct {
   marketHub?: string;
   category?: string;
   imageUrl?: string;
+  photoUrl?: string;
   photo_url?: string;
   mediaUrl?: string;
   photos?: string[];
@@ -587,6 +588,7 @@ export function mapBackendProductToFrontend(raw: BackendProduct): Product {
   const city = raw.city || raw.marketHub || vendor.city || "Lagos";
   const photoUrl = resolveBackendMediaUrl(
     raw.imageUrl ||
+    raw.photoUrl ||
     raw.photo_url ||
     raw.mediaUrl ||
     raw.photos?.[0]
@@ -1029,28 +1031,17 @@ export interface WhatsappRequestCodeResponse {
   success?: boolean;
 }
 
-export const FLOATE_WHATSAPP_AUTH_NUMBER = "2348031234567";
-
-function buildWhatsappAuthLink(code: string): string {
-  const text = encodeURIComponent(`AUTH: ${code}`);
-  return `https://wa.me/${FLOATE_WHATSAPP_AUTH_NUMBER}?text=${text}`;
-}
-
 function ensureWhatsappAuthLink(link: string, code: string): string {
-  try {
-    const url = new URL(link);
-    if (!["wa.me", "api.whatsapp.com", "web.whatsapp.com"].includes(url.hostname)) {
-      return buildWhatsappAuthLink(code);
-    }
-
-    const currentText = url.searchParams.get("text") || "";
-    if (!currentText.includes(code)) {
-      url.searchParams.set("text", [currentText, `AUTH: ${code}`].filter(Boolean).join(" "));
-    }
-    return url.toString();
-  } catch {
-    return buildWhatsappAuthLink(code);
+  const url = new URL(link);
+  if (url.protocol !== "https:" || !["wa.me", "api.whatsapp.com", "web.whatsapp.com"].includes(url.hostname)) {
+    throw new Error("Backend returned an invalid WhatsApp authentication link.");
   }
+
+  const currentText = url.searchParams.get("text") || "";
+  if (!currentText.includes(code)) {
+    url.searchParams.set("text", [currentText, `AUTH: ${code}`].filter(Boolean).join(" "));
+  }
+  return url.toString();
 }
 
 export interface WhatsappSessionStatusResponse {
@@ -1087,11 +1078,10 @@ export async function requestWhatsappCode(phone: string): Promise<WhatsappReques
         throw new Error(data.error || data.message || "The server did not issue a WhatsApp authentication code.");
       }
       const returnedLink = data.whatsapp_link || data.whatsappLink || data.whatsapp_url || data.whatsappUrl;
+      if (!returnedLink) throw new Error("Backend did not provide the Floate WhatsApp authentication link.");
       return {
         challenge_code: code,
-        whatsapp_link: returnedLink
-          ? ensureWhatsappAuthLink(returnedLink, code)
-          : buildWhatsappAuthLink(code),
+        whatsapp_link: ensureWhatsappAuthLink(returnedLink, code),
         expires_in_seconds: data.expires_in_seconds || data.expiresInSeconds || 300,
         success: true
       };
@@ -1166,11 +1156,7 @@ export interface FlutterwaveCheckoutResponse {
 }
 
 export async function initiateFlutterwaveCheckout(payload: FlutterwaveCheckoutPayload): Promise<FlutterwaveCheckoutResponse> {
-  const backendUrl = (
-    (typeof process !== "undefined" && (process.env?.NEXT_PUBLIC_FLOATE_BACKEND_URL || process.env?.VITE_FLOATE_BACKEND_URL)) ||
-    (typeof import.meta !== "undefined" && (import.meta.env?.VITE_FLOATE_BACKEND_URL || import.meta.env?.NEXT_PUBLIC_FLOATE_BACKEND_URL)) ||
-    "https://floate-v2-backend-original.onrender.com"
-  ).replace(/\/+$/, "");
+  const backendUrl = FLOATE_API_URL;
 
   const cleanPhone = sanitizeIntlPhone(payload.merchantPhone);
   const body = {

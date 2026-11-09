@@ -1,7 +1,8 @@
 const BACKEND_URL = (
   process.env.FLOATE_BACKEND_URL ||
+  process.env.VITE_FLOATE_BACKEND_URL ||
   process.env.NEXT_PUBLIC_FLOATE_BACKEND_URL ||
-  "https://floate-v2-backend-original.onrender.com"
+  ""
 ).replace(/\/+$/, "");
 const DEFAULT_IMAGE = "https://i.postimg.cc/mkSLsdxb/20260929-122817.jpg";
 
@@ -65,7 +66,7 @@ export default async function handler(req: any, res: any) {
       .trim()
       .slice(0, 300);
     const rawImage = (Array.isArray(product.photos) ? product.photos[0] : "") ||
-      product.photo_url || product.imageUrl || product.image || "";
+      product.photo_url || product.photoUrl || product.imageUrl || product.image || "";
     const image = absoluteProductImage(rawImage, id);
     const priceValue = product.price_naira ?? product.price;
     const price = typeof priceValue === "number"
