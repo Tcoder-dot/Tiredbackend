@@ -300,6 +300,25 @@ export interface InboundClassificationResult {
   rawText: string;
 }
 
+function looksLikeBuyerSearchIntent(rawInput: string): boolean {
+  const text = (rawInput || '').trim();
+  if (!text) return false;
+
+  const lower = text.toLowerCase();
+  const shoppingSignals = /\b(?:i\s+(?:want|need|am\s+looking\s+for|need|am\s+trying\s+to\s+buy)|looking\s+for|search(?:ing)?\s+for|find\s+(?:me\s+)?|buy\s+(?:me\s+)?|order\s+(?:me\s+)?|shop(?:ping)?\s+(?:for\s+)?|get\s+(?:me\s+)?|need\s+(?:a\s+)?|want\s+(?:to\s+)?(?:buy|shop|order|find))\b/i;
+  const buyingSignals = /^(?:search|find|look\s+for|buy|order|shop\s+for|get|need)\b/i;
+  const productTerms = /\b(?:shoe|shoes|slipper|slippers|sandal|sandals|phone|phones|iphone|ipad|tablet|laptop|laptops|pc|computer|charger|headset|speaker|bag|bags|dress|dresses|cloth|clothes|fabric|fabrics|jacket|jeans|perfume|wig|wigs|gadget|gadgets|generator|inverter|solar|tv|television|earpiece|watch|shoes|footwear|sandals|sneakers|heels|bag|wallet|glasses|sunglasses|makeup|cosmetics|lawyer|video\s+editor|mechanic|caterer|photographer|tailor|designer|engineer|doctor|nurse|consultant|dentist)\b/i;
+  const locationTerms = /\b(?:lagos|onitsha|enugu|abuja|ikeja|alaba|computer\s+village|main\s+market|wuse|owerri|asaba|aba|port\s+harcourt|kano|ibadan|kaduna|warri|calabar|jos|uyo|minna|benin)\b/i;
+  const priceTerms = /(?:₦|naira|ngn|\b\d+(?:\.\d+)?\s*(?:k|m|kobo|thousand|million)\b)/i;
+
+  const hasCommerceIntent = shoppingSignals.test(lower) || buyingSignals.test(lower);
+  const hasCommerceContext = productTerms.test(lower) || priceTerms.test(lower) || locationTerms.test(lower);
+
+  if (!hasCommerceIntent || !hasCommerceContext) return false;
+
+  return !/\b(?:register|sell\s+on\s+floate|open\s+my\s+business|merchant\s+portal|vendor\s+portal|start\s+selling|add\s+my\s+product|promote\s+my\s+product|sponsor\s+my\s+product)\b/i.test(lower);
+}
+
 /**
  * Detects whether the user is inquiring about sponsoring, boosting, promoting, or advertising
  * their store, products, or catalog on Floate.
@@ -526,6 +545,11 @@ export async function classifyInboundIntent(rawInput: string): Promise<InboundCl
     /^(?:my\s+business|my\s+store|my\s+shop|my\s+biz|open\s+my\s+business|access\s+my\s+business|manage\s+my\s+business|manage\s+my\s+store|manage\s+my\s+shop|business\s+portal|merchant\s+portal|vendor\s+portal|vendor\s+hub|merchant\s+hub|register\s+business|register\s+my\s+business|register\s+shop|register\s+store|sell\s+on\s+floate|start\s+selling|vendor\s+registration|merchant\s+registration)$/i.test(lower)
   ) {
     return { intent: 'MERCHANT_PORTAL', confidence: 1.0, rawText: text };
+  }
+
+  // Fast buyer-search path: if the user already said what they want, do not force a clarification loop.
+  if (looksLikeBuyerSearchIntent(text)) {
+    return { intent: 'BUYER_SEARCH', confidence: 0.97, rawText: text };
   }
 
   // SafePay Payment Method selection fast path (Bank Transfer, Crypto, Card) - Only if SafePay is enabled
@@ -848,6 +872,14 @@ function fallbackIntentClassifier(text: string, lower: string): InboundClassific
   // 10. Browse Markets
   if (text === 'btn_browse_markets' || /^(browse markets|markets|view markets|market hub|market hubs)$/i.test(lower)) {
     return { intent: 'BROWSE_MARKETS', confidence: 0.95, rawText: text };
+  }
+
+  if (looksLikeBuyerSearchIntent(text)) {
+    return {
+      intent: 'BUYER_SEARCH',
+      confidence: 0.9,
+      rawText: text,
+    };
   }
 
   // Unknown text should not trigger a search without a clear shopping intent.
