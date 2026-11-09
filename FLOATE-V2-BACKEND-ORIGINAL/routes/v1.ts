@@ -21,6 +21,16 @@ const ai = new GoogleGenAI({
   }
 });
 
+interface CartVendor {
+  slug: string;
+  name: string;
+  whatsapp_number: string;
+  city: string;
+  verified: boolean;
+  fid?: string;
+  isVerified?: boolean;
+}
+
 // In-memory cart store per session / cart_id
 interface CartItem {
   id: string;
@@ -30,17 +40,12 @@ interface CartItem {
   formatted_price: string;
   photo_url: string;
   quantity: number;
+  vendor: CartVendor;
 }
 
 interface CartStore {
   cart_id: string;
-  vendor: {
-    slug: string;
-    name: string;
-    whatsapp_number: string;
-    city: string;
-    verified: boolean;
-  } | null;
+  vendor: CartVendor | null;
   items: CartItem[];
   updated_at: number;
 }
@@ -949,7 +954,7 @@ router.get("/api/v1/products/:id", async (req: Request, res: Response) => {
 });
 
 // ----------------------------------------------------
-// 7. POST /api/v1/carts/items  (200 or 409 CART_VENDOR_CONFLICT)
+// 7. POST /api/v1/carts/items
 // ----------------------------------------------------
 router.post("/api/v1/carts/items", async (req: Request, res: Response) => {
   try {
@@ -966,30 +971,11 @@ router.post("/api/v1/carts/items", async (req: Request, res: Response) => {
 
     const cart = getOrCreateCart(cart_id);
 
-    // Conflict detection: If cart already has a vendor AND it's different from the new product vendor
-    if (cart.vendor && cart.vendor.slug !== product.vendor.slug && cart.items.length > 0) {
-      return res.status(409).json({
-        error: "CART_VENDOR_CONFLICT",
-        code: "CART_VENDOR_CONFLICT",
-        message: `Your cart already contains items from ${cart.vendor.name}. Floate orders are direct with a single vendor. Replace cart with ${product.vendor.name} or keep existing items?`,
-        current_vendor: cart.vendor,
-        new_vendor: product.vendor,
-        item: {
-          id: product.id,
-          title: product.title,
-          price_naira: product.price_naira,
-          photo_url: product.photo_url
-        }
-      });
-    }
-
-    // Set or preserve vendor
-    cart.vendor = product.vendor;
-
     // Add or update item quantity
     const existingIndex = cart.items.findIndex((it) => it.product_id === product.id);
     if (existingIndex >= 0) {
       cart.items[existingIndex].quantity += Number(quantity);
+      cart.items[existingIndex].vendor = product.vendor;
     } else {
       cart.items.push({
         id: `cart-item-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
@@ -998,9 +984,11 @@ router.post("/api/v1/carts/items", async (req: Request, res: Response) => {
         price_naira: product.price_naira,
         formatted_price: product.formatted_price,
         photo_url: product.photo_url,
-        quantity: Number(quantity)
+        quantity: Number(quantity),
+        vendor: product.vendor
       });
     }
+    cart.vendor ||= product.vendor;
     cart.updated_at = Date.now();
 
     const totalNaira = cart.items.reduce((acc, it) => acc + it.price_naira * it.quantity, 0);
@@ -1059,9 +1047,7 @@ router.patch("/api/v1/carts/items/:id", (req: Request, res: Response) => {
     } else {
       cart.items[itemIndex].quantity = Number(quantity);
     }
-    if (cart.items.length === 0) {
-      cart.vendor = null;
-    }
+    cart.vendor = cart.items[0]?.vendor || null;
   }
 
   const totalNaira = cart.items.reduce((acc, it) => acc + it.price_naira * it.quantity, 0);
@@ -1091,9 +1077,7 @@ router.delete("/api/v1/carts/items/:id", (req: Request, res: Response) => {
   if (itemIndex >= 0) {
     cart.items.splice(itemIndex, 1);
   }
-  if (cart.items.length === 0) {
-    cart.vendor = null;
-  }
+  cart.vendor = cart.items[0]?.vendor || null;
 
   const totalNaira = cart.items.reduce((acc, it) => acc + it.price_naira * it.quantity, 0);
 
@@ -1139,7 +1123,8 @@ router.post("/api/v1/carts/me/replace", async (req: Request, res: Response) => {
       price_naira: product.price_naira,
       formatted_price: product.formatted_price,
       photo_url: product.photo_url,
-      quantity: Number(quantity)
+      quantity: Number(quantity),
+      vendor: product.vendor
     });
     cart.updated_at = Date.now();
 
@@ -1198,6 +1183,15 @@ router.post("/api/v1/carts/me/buy", async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         error: "Cart is empty. Add verified products to continue to WhatsApp."
+      });
+    }
+
+    const vendorSlugs = new Set(cart.items.map((item) => item.vendor?.slug).filter(Boolean));
+    if (vendorSlugs.size > 1) {
+      return res.status(409).json({
+        success: false,
+        code: "CART_MULTIPLE_VENDORS",
+        error: "Use the Floate AI chat button for each merchant group to continue with multiple sellers."
       });
     }
 
@@ -1567,26 +1561,13 @@ router.post("/api/v1/cart/add", async (req: Request, res: Response) => {
     if (force_replace) {
       cart.items = [];
       cart.vendor = product.vendor;
-    } else if (cart.vendor && cart.vendor.slug !== product.vendor.slug && cart.items.length > 0) {
-      return res.status(409).json({
-        error: "CART_VENDOR_CONFLICT",
-        code: "CART_VENDOR_CONFLICT",
-        message: `Your cart has items from ${cart.vendor.name}. Would you like to clear cart and add items from ${product.vendor.name} instead?`,
-        current_vendor: cart.vendor,
-        new_vendor: product.vendor,
-        item: {
-          id: product.id,
-          title: product.title,
-          price_naira: product.price_naira,
-          photo_url: product.photo_url
-        }
-      });
     }
 
-    cart.vendor = product.vendor;
+    cart.vendor ||= product.vendor;
     const existingIndex = cart.items.findIndex((it) => it.product_id === product.id);
     if (existingIndex >= 0) {
       cart.items[existingIndex].quantity += Number(quantity);
+      cart.items[existingIndex].vendor = product.vendor;
     } else {
       cart.items.push({
         id: `cart-item-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
@@ -1595,7 +1576,8 @@ router.post("/api/v1/cart/add", async (req: Request, res: Response) => {
         price_naira: product.price_naira,
         formatted_price: product.formatted_price,
         photo_url: product.photo_url,
-        quantity: Number(quantity)
+        quantity: Number(quantity),
+        vendor: product.vendor
       });
     }
 

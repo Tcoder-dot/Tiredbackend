@@ -1111,6 +1111,30 @@ export async function handleWhatsAppWebhook(req: express.Request, res: express.R
           const cleanPhoneNum = senderPhone.replace(/\D/g, '');
           const normalizedInput = (rawText || '').trim().toLowerCase();
 
+          if (rawText.trimStart().toUpperCase().startsWith('FLOATE_LEAD:')) {
+            try {
+              const payload = JSON.parse(rawText.trim().slice('FLOATE_LEAD:'.length));
+              const merchantIdentifier = [payload?.merchantPhone, payload?.merchantSlug, payload?.merchantName]
+                .find((value) => typeof value === 'string' && value.trim());
+
+              if (payload?.type !== 'STOREFRONT_LEAD' || !merchantIdentifier) {
+                throw new Error('The storefront lead payload is missing merchant details.');
+              }
+
+              await startFloateDirectHandoff(senderPhone, senderName, merchantIdentifier.trim(), {
+                productName: typeof payload.productName === 'string' ? payload.productName.slice(0, 160) : undefined,
+                price: typeof payload.price === 'string' ? payload.price.slice(0, 40) : undefined,
+              });
+            } catch (error) {
+              console.warn('[Storefront Lead] Invalid lead payload:', error);
+              await sendWhatsAppMessage(
+                senderPhone,
+                'I could not verify the storefront from that link. Please return to Floate and open the seller or product again.'
+              );
+            }
+            continue;
+          }
+
           if (
             normalizedInput === 'btn_my_store' ||
             normalizedInput.includes('my web store') ||
@@ -1179,7 +1203,12 @@ export async function handleWhatsAppWebhook(req: express.Request, res: express.R
  * Connects a buyer directly to a vendor via Direct 1-on-1 WhatsApp Handoff
  * with pre-filled product inquiry message and Floate SafePay guarantee.
  */
-export async function startFloateDirectHandoff(buyerPhone: string, buyerName: string, bizId: string) {
+export async function startFloateDirectHandoff(
+  buyerPhone: string,
+  buyerName: string,
+  bizId: string,
+  leadContext: { productName?: string; price?: string; deliveryLocation?: string; whenNeeded?: string } = {}
+) {
   const cleanBuyerPhone = normalizePhone(buyerPhone).replace(/^0/, '234');
   let listing = sheetsDb.getListingById(bizId);
   
@@ -1221,13 +1250,23 @@ export async function startFloateDirectHandoff(buyerPhone: string, buyerName: st
     }
   }
 
+  if (!listing?.whatsapp) {
+    await sendWhatsAppMessage(
+      cleanBuyerPhone,
+      'I could not verify this seller on Floate, so I cannot safely connect you. Please reopen the product or storefront and try again.'
+    );
+    return;
+  }
+
+  const merchantId = listing.id || bizId;
+
   // Intercept reveal for lead qualification
   const buyerSession = getWhatsAppSession(cleanBuyerPhone);
   
   // Check if buyer has already qualified for this vendor
   let isQualified = false;
   try {
-    isQualified = await firestoreDb.checkBuyerQualification(cleanBuyerPhone, bizId);
+    isQualified = await firestoreDb.checkBuyerQualification(cleanBuyerPhone, merchantId);
   } catch (err) {
     console.warn('[Qualification Check Warning]:', err);
   }
@@ -1237,7 +1276,9 @@ export async function startFloateDirectHandoff(buyerPhone: string, buyerName: st
       state: 'QUALIFYING_LOCATION',
       leadQualificationDraft: {
         step: 'AWAITING_DELIVERY_LOCATION',
-        vendorId: bizId,
+        vendorId: merchantId,
+        item: leadContext.productName || listing.product || 'Items',
+        price: leadContext.price || listing.price,
         updatedAt: new Date().toISOString(),
       },
     });
@@ -1253,10 +1294,10 @@ export async function startFloateDirectHandoff(buyerPhone: string, buyerName: st
   const bizName = listing?.businessName || 'Verified Vendor';
   const rawBizPhone = listing?.whatsapp || '';
   const vendorPhone = normalizePhone(rawBizPhone).replace(/^0/, '234');
-  const item = listing?.product || 'Items';
+  const item = leadContext.productName || listing?.product || 'Items';
 
   // Check if price is a valid numeric price or a placeholder
-  const rawPrice = listing?.price || '';
+  const rawPrice = leadContext.price || listing?.price || '';
   const isPlaceholderPrice = !rawPrice || /^(contact|market|negotiable|n\/a|ask|none|null|undefined)/i.test(rawPrice.trim()) || rawPrice.trim() === '₦' || rawPrice.trim() === 'N';
   const hasValidPrice = !isPlaceholderPrice && rawPrice.replace(/[^0-9]/g, '').length > 0;
   const priceDisplay = hasValidPrice ? formatProductPrice(rawPrice) : '';
@@ -1291,13 +1332,13 @@ export async function startFloateDirectHandoff(buyerPhone: string, buyerName: st
     await firestoreDb.recordWhatsAppLead({
       buyerPhone: cleanBuyerPhone,
       buyerName: buyerName && buyerName !== 'Customer' ? buyerName : 'Buyer',
-      merchantId: bizId,
+      merchantId,
       merchantName: bizName,
       merchantWhatsapp: vendorPhone,
       item,
       orderVolume: 'Retail',
       fulfillment: 'Local City Delivery',
-      buyerLocation: listing?.city || 'Nigeria',
+      buyerLocation: leadContext.deliveryLocation || listing?.city || 'Nigeria',
     });
   } catch (err) {
     console.warn('[Direct Customer Record Warning]:', err);
@@ -1363,7 +1404,8 @@ export async function startFloateDirectHandoff(buyerPhone: string, buyerName: st
     `─────────────────────────\n` +
     `Customer: *${buyerName && buyerName !== 'Customer' ? buyerName : 'Customer'}* (+${cleanBuyerPhone})\n` +
     `Product Inquired: *${item}*${priceClause}\n` +
-    `Location: ${locDisplay}\n` +
+    `Buyer Delivery Location: ${leadContext.deliveryLocation || locDisplay}\n` +
+    (leadContext.whenNeeded ? `When Needed: ${leadContext.whenNeeded}\n` : '') +
     `─────────────────────────\n` +
     `💳 *5 Credits deducted* (Wallet Balance: ${remainingCredits} credits)\n\n` +
     `The customer has received your direct WhatsApp chat button. Expect their message shortly!`;
@@ -5867,7 +5909,12 @@ export async function processMasterWhatsAppEngine(params: {
     });
     
     await sendWhatsAppMessage(cleanPhone, `Thank you! Qualification complete.`);
-    await startFloateDirectHandoff(cleanPhone, senderName, finalDraft.vendorId!);
+    await startFloateDirectHandoff(cleanPhone, senderName, finalDraft.vendorId!, {
+      productName: finalDraft.item,
+      price: finalDraft.price,
+      deliveryLocation: finalDraft.deliveryLocation,
+      whenNeeded: finalDraft.whenNeeded,
+    });
     return;
   }
 

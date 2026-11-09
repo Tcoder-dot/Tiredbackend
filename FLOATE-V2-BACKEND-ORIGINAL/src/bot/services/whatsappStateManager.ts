@@ -121,6 +121,8 @@ export interface WhatsAppLeadQualificationDraft {
   deliveryLocation?: string;
   whenNeeded?: string;
   vendorId?: string;
+  item?: string;
+  price?: string;
   updatedAt: string;
 }
 

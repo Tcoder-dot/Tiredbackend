@@ -1,4 +1,4 @@
-limport { initializeApp, getApps, getApp } from 'firebase/app';
+import { initializeApp, getApps, getApp } from 'firebase/app';
 import { InlineKeyboard } from 'grammy';
 import {
   getFirestore,
@@ -2135,7 +2135,7 @@ export class FirestoreService {
       await batch.commit();
 
       // Pending and rejected merchants stay out of the Sheets auto-verification path.
-      if (!currentMerchant || (currentMerchant.status !== 'PENDING_REVIEW' && currentMerchant.status !== 'REJECTED')) {
+      if (currentMerchant.status !== 'PENDING_REVIEW') {
         sheetsDb.registerBusiness({
           userId: data.userId,
           businessName: data.businessName,
