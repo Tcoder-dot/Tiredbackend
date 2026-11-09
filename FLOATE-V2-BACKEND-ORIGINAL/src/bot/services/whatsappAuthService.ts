@@ -399,7 +399,6 @@ export class WhatsAppAuthService {
         error: 'Challenge code query parameter ("code") is required.',
       };
     }
-
     const code = codeQuery.trim().toUpperCase();
 
     // 1. In-memory lookup
@@ -473,6 +472,70 @@ export class WhatsAppAuthService {
       authenticated: false,
       status: session.status || 'EXPIRED',
       error: 'Session is no longer active.',
+    };
+  }
+
+  public async authenticateVerifiedPhone(phoneInput: string): Promise<{
+    authenticated: boolean;
+    requires_registration: boolean;
+    status: 'VERIFIED' | 'REQUIRES_REGISTRATION';
+    phone: string;
+    token?: string;
+    refreshToken?: string;
+    slug?: string;
+    vendor?: any;
+  }> {
+    const { e164, canonical } = formatPhoneNumber(phoneInput);
+    if (!/^234\d{10}$/.test(canonical)) {
+      throw new Error('A valid WhatsApp phone number is required.');
+    }
+
+    const vendor = await firestoreDb.getMerchant(canonical);
+    if (!vendor) {
+      return {
+        authenticated: false,
+        requires_registration: true,
+        status: 'REQUIRES_REGISTRATION',
+        phone: e164,
+      };
+    }
+
+    if (this.jwtSecret.length < 32) {
+      throw new Error('Merchant login signing secret is not configured.');
+    }
+
+    const vendorData = vendor as any;
+    const vendorId = vendorData.id || canonical;
+    const businessName = vendorData.businessName || vendorData.name || 'Verified Merchant';
+    const slug = vendorData.slug || canonical;
+    const isVerified = Boolean(vendorData.isVerified || vendorData.verified);
+    const token = jwt.sign(
+      {
+        sub: canonical,
+        phone: e164,
+        vendorId,
+        businessName,
+        role: isVerified ? 'VERIFIED_MERCHANT' : 'MERCHANT',
+        iss: 'FLOATE_AUTH_ENGINE',
+      },
+      this.jwtSecret,
+      { expiresIn: '24h' }
+    );
+    const refreshToken = jwt.sign(
+      { sub: canonical, type: 'refresh_token', iss: 'FLOATE_AUTH_ENGINE' },
+      this.jwtSecret,
+      { expiresIn: '30d' }
+    );
+
+    return {
+      authenticated: true,
+      requires_registration: false,
+      status: 'VERIFIED',
+      phone: e164,
+      token,
+      refreshToken,
+      slug,
+      vendor: { ...vendorData, id: vendorId, slug, businessName },
     };
   }
 

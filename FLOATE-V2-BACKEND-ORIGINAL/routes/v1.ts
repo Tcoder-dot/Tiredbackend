@@ -1238,35 +1238,25 @@ router.post("/api/v1/carts/me/buy", async (req: Request, res: Response) => {
 // ----------------------------------------------------
 router.post("/api/v1/intake/voice", async (req: Request, res: Response) => {
   try {
-    const { transcript, audio_base64 } = req.body;
-    let queryText = (transcript || "").trim();
+    const { transcript, audio_base64, mime_type } = req.body || {};
+    let queryText = typeof transcript === "string" ? transcript.trim() : "";
 
-    // If audio is provided without transcript, use Gemini to parse speech or intent
-    if (!queryText && audio_base64) {
-      try {
-        const response = await ai.models.generateContent({
-          model: "gemini-3.7-flash",
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: "audio/mp3",
-                    data: audio_base64
-                  }
-                },
-                {
-                  text: "Listen to this audio and transcribe what product, service, or merchant the Nigerian buyer is looking for."
-                }
-              ]
-            }
+    if (!queryText && typeof audio_base64 === "string" && audio_base64.trim()) {
+      const audioData = audio_base64.replace(/^data:audio\/[^;]+;base64,/, "");
+      const audioMimeType = typeof mime_type === "string" && mime_type.startsWith("audio/")
+        ? mime_type
+        : "audio/ogg";
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: [{
+          role: "user",
+          parts: [
+            { inlineData: { mimeType: audioMimeType, data: audioData } },
+            { text: "Transcribe this buyer's voice note. Return only the spoken words, preserving product names, locations, and budgets." }
           ]
-        });
-        queryText = response.text || "";
-      } catch (err: any) {
-        console.warn("[Voice Intake Gemini audio error]:", err.message);
-      }
+        }]
+      });
+      queryText = (response.text || "").trim();
     }
 
     if (!queryText) {
@@ -1277,13 +1267,12 @@ router.post("/api/v1/intake/voice", async (req: Request, res: Response) => {
       });
     }
 
-    // Extract search query, city, and max price using AI
     try {
       const parsed = await ai.models.generateContent({
-        model: "gemini-3.7-flash",
-        contents: `Extract shopping intent from this Nigerian buyer voice input: "${queryText}"`,
+        model: "gemini-2.5-flash",
+        contents: `Extract the product query, city if mentioned (e.g. Lagos, Onitsha, Aba, Abuja, Kano, Ibadan, Enugu, Port Harcourt), and budget/max price in Naira if mentioned from this buyer request: "${queryText}"`,
         config: {
-          systemInstruction: `Extract the product query, city if mentioned (e.g. Lagos, Onitsha, Aba, Abuja, Kano, Ibadan, Enugu, Port Harcourt), and budget/max price in Naira if mentioned. Return pure JSON.`,
+          systemInstruction: "Extract shopping intent from Nigerian buyer text. Return pure JSON.",
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -1298,20 +1287,17 @@ router.post("/api/v1/intake/voice", async (req: Request, res: Response) => {
         }
       });
 
-      const resJson = JSON.parse(parsed.text || "{}");
+      const parsedIntent = JSON.parse(parsed.text || "{}");
       return res.json({
-        intent: "search",
-        query: resJson.query || queryText,
-        city: resJson.city || undefined,
-        max_price_naira: resJson.max_price_naira || undefined
+        intent: parsedIntent.intent || "search",
+        query: parsedIntent.query || queryText,
+        city: parsedIntent.city || undefined,
+        max_price_naira: parsedIntent.max_price_naira || undefined,
+        transcript: queryText
       });
     } catch (aiErr: any) {
       console.warn("[Floate AI Search Intent] AI parsing error, using fallback:", aiErr.message || aiErr);
-      return res.json({
-        intent: "search",
-        query: queryText,
-        city: undefined
-      });
+      return res.json({ intent: "search", query: queryText, transcript: queryText });
     }
   } catch (error: any) {
     console.error("[POST /api/v1/intake/voice error]:", error);
@@ -1823,6 +1809,28 @@ interface RegistrationOtpRecord {
   expiresAt: number;
 }
 
+async function consumeWhatsAppOtp(canonicalPhone: string, code: string): Promise<boolean> {
+  const key = `registration_otp:${canonicalPhone}`;
+  const record = await redisService.get<RegistrationOtpRecord>(key);
+  if (!record || record.expiresAt <= Date.now() || record.attempts >= 5) {
+    await redisService.del(key);
+    return false;
+  }
+
+  const submitted = Buffer.from(code);
+  const expected = Buffer.from(record.code);
+  const isValid = submitted.length === expected.length && timingSafeEqual(submitted, expected);
+  if (!isValid) {
+    record.attempts += 1;
+    if (record.attempts >= 5) await redisService.del(key);
+    else await redisService.set(key, record, Math.ceil((record.expiresAt - Date.now()) / 1000));
+    return false;
+  }
+
+  await redisService.del(key);
+  return true;
+}
+
 router.post(["/api/v1/auth/whatsapp/request-code", "/api/auth/whatsapp/request-code"], async (req: Request, res: Response) => {
   const phone = String(req.body?.phone || req.body?.phoneNumber || "").trim();
   if (!phone) return res.status(400).json({ success: false, error: "Phone number is required." });
@@ -1876,7 +1884,7 @@ router.post(["/api/auth/whatsapp/send-otp", "/auth/whatsapp/send-otp"], async (r
       return res.status(503).json({ success: false, error: "Could not store the verification code." });
     }
 
-    const delivered = await sendWhatsAppMessage(canonical, `Your Floate registration verification code is ${record.code}. It expires in 10 minutes.`);
+    const delivered = await sendWhatsAppMessage(canonical, `Your Floate verification code is ${record.code}. It expires in 10 minutes.`);
     if (!delivered) {
       await redisService.del(key);
       return res.status(502).json({ success: false, error: "WhatsApp could not deliver the verification code." });
@@ -1897,27 +1905,37 @@ router.post(["/api/auth/whatsapp/verify", "/auth/whatsapp/verify"], async (req: 
 
   try {
     const { canonical } = formatPhoneNumber(phone);
-    const key = `registration_otp:${canonical}`;
-    const record = await redisService.get<RegistrationOtpRecord>(key);
-    if (!record || record.expiresAt <= Date.now() || record.attempts >= 5) {
-      await redisService.del(key);
+    if (!await consumeWhatsAppOtp(canonical, code)) {
       return res.status(400).json({ success: false, error: "Verification code is invalid or expired." });
     }
 
-    const submitted = Buffer.from(code);
-    const expected = Buffer.from(record.code);
-    const isValid = submitted.length === expected.length && timingSafeEqual(submitted, expected);
-    if (!isValid) {
-      record.attempts += 1;
-      if (record.attempts >= 5) await redisService.del(key);
-      else await redisService.set(key, record, Math.ceil((record.expiresAt - Date.now()) / 1000));
-      return res.status(400).json({ success: false, error: "Verification code is invalid or expired." });
-    }
-
-    await redisService.del(key);
     return res.json({ success: true, verified: true, message: "WhatsApp phone verified successfully." });
   } catch (error: any) {
     return res.status(503).json({ success: false, error: error.message || "Phone verification is unavailable." });
+  }
+});
+
+router.post(["/api/v1/auth/whatsapp/verify-login", "/api/auth/whatsapp/verify-login"], async (req: Request, res: Response) => {
+  const phone = String(req.body?.phoneNumber || req.body?.phone || "").trim();
+  const code = String(req.body?.otp || req.body?.code || "").trim();
+  if (!phone || !/^\d{4}$/.test(code)) {
+    return res.status(400).json({ success: false, authenticated: false, error: "Phone number and four-digit code are required." });
+  }
+
+  try {
+    const { canonical } = formatPhoneNumber(phone);
+    if (!/^234\d{10}$/.test(canonical)) {
+      return res.status(400).json({ success: false, authenticated: false, error: "A valid WhatsApp phone number is required." });
+    }
+
+    if (!await consumeWhatsAppOtp(canonical, code)) {
+      return res.status(400).json({ success: false, authenticated: false, error: "Verification code is invalid or expired." });
+    }
+
+    const result = await whatsappAuthService.authenticateVerifiedPhone(canonical);
+    return res.json({ success: true, ...result });
+  } catch (error: any) {
+    return res.status(503).json({ success: false, authenticated: false, error: error.message || "WhatsApp login is unavailable." });
   }
 });
 
