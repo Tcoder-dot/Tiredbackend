@@ -144,13 +144,15 @@ const parseAdminAdPayload = (value: unknown) => {
   };
 };
 
-app.get("/admin/ads", (_req, res) => {
+const serveAdminAdsDashboard: express.RequestHandler = (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' https: http:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
   return res.type("html").send(adminAdsDashboardHtml);
-});
+};
+
+app.get(["/", "/admin/ads"], serveAdminAdsDashboard);
 
 app.get("/api/admin/ads", requireAdminApiKey, async (_req, res) => {
   try {
