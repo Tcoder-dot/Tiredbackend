@@ -103,7 +103,7 @@ function getAdminApp() {
     {
       credential,
       projectId: process.env.FIREBASE_PROJECT_ID || firebaseConfig.projectId,
-      storageBucket: firebaseConfig.storageBucket,
+      storageBucket: process.env.FIREBASE_STORAGE_BUCKET?.trim() || firebaseConfig.storageBucket,
     },
     "floate-ads-admin"
   );
