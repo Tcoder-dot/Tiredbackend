@@ -90,6 +90,10 @@ export const adminAdsDashboardHtml = `<!doctype html>
             <label class="wide">Description<textarea name="description" maxlength="600"></textarea></label>
             <label>CTA text<input name="ctaText" maxlength="60" value="View offer"></label>
             <label>Category / ad type<input name="adType" maxlength="80" value="HERO_BANNER"></label>
+            <label>Display style<select name="displayMode"><option value="MARQUEE">Horizontal auto-scroll loop</option><option value="POPUP">Popup below search</option></select></label>
+            <label>Popup interval (seconds)<input name="displayIntervalSeconds" type="number" min="10" max="86400" step="1" value="60"><span class="muted">How often a popup repeats (10–86,400 sec).</span></label>
+            <label>Popup visible time (seconds)<input name="displayDurationSeconds" type="number" min="3" max="60" step="1" value="8"><span class="muted">How long each popup stays visible (3–60 sec).</span></label>
+            <label>Horizontal loop duration (seconds)<input name="scrollDurationSeconds" type="number" min="8" max="120" step="1" value="28"><span class="muted">Time for one full loop (8–120 sec).</span></label>
             <label class="wide">Banner image file<input id="banner-image" name="bannerImage" type="file" accept="image/jpeg,image/png,image/webp" required><span id="image-help" class="muted">JPG, PNG, or WebP · maximum 8 MB. Cropped to 1200 x 400 (3:1) to match the storefront banner.</span></label>
             <div class="wide"><img id="image-preview" class="image-preview" alt="Selected banner preview" hidden></div>
             <label class="wide">Target URL<input name="targetUrl" maxlength="2048" placeholder="/search or https://..." required></label>
@@ -145,7 +149,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
       const locationFilter = document.getElementById("metrics-location");
       const categoryFilter = document.getElementById("metrics-category");
       const boostStatusFilter = document.getElementById("boost-status-filter");
-      const fields = ["merchantName", "headline", "description", "ctaText", "adType", "targetUrl", "targetCities", "targetCategories", "keywords", "status"];
+      const fields = ["merchantName", "headline", "description", "ctaText", "adType", "displayMode", "displayIntervalSeconds", "displayDurationSeconds", "scrollDurationSeconds", "targetUrl", "targetCities", "targetCategories", "keywords", "status"];
       let adminKey = sessionStorage.getItem(keySlot) || "";
       let editingId = "";
       let currentImageUrl = "";
@@ -228,7 +232,8 @@ export const adminAdsDashboardHtml = `<!doctype html>
           badge.className = "badge " + campaign.status;
           badge.textContent = campaign.status;
           const merchant = document.createElement("p");
-          merchant.textContent = (campaign.merchantName || "Floate Partner") + " · " + (campaign.adType || "Sponsored");
+          const displayMode = campaign.displayMode === "POPUP" ? "Popup" : "Horizontal loop";
+          merchant.textContent = (campaign.merchantName || "Floate Partner") + " · " + (campaign.adType || "Sponsored") + " · " + displayMode;
           const description = document.createElement("p");
           description.textContent = campaign.description || "";
           const stats = document.createElement("p");
@@ -442,6 +447,10 @@ export const adminAdsDashboardHtml = `<!doctype html>
         imageHelp.textContent = "JPG, PNG, or WebP · maximum 8 MB. Cropped to 1200 x 400 (3:1) to match the storefront banner.";
         form.elements.namedItem("ctaText").value = "View offer";
         form.elements.namedItem("adType").value = "HERO_BANNER";
+        form.elements.namedItem("displayMode").value = "MARQUEE";
+        form.elements.namedItem("displayIntervalSeconds").value = "60";
+        form.elements.namedItem("displayDurationSeconds").value = "8";
+        form.elements.namedItem("scrollDurationSeconds").value = "28";
         form.elements.namedItem("status").value = "ACTIVE";
         document.getElementById("form-title").textContent = "Create campaign";
         document.getElementById("save-button").textContent = "Create campaign";
@@ -462,6 +471,10 @@ export const adminAdsDashboardHtml = `<!doctype html>
           const value = campaign[field] ?? (field === "targetCities" ? campaign.targetLocation : field === "targetCategories" ? campaign.targetCategory : "");
           form.elements.namedItem(field).value = ["targetCities", "targetCategories", "keywords"].includes(field) ? splitList(value) : value;
         }
+        form.elements.namedItem("displayMode").value = campaign.displayMode === "POPUP" ? "POPUP" : "MARQUEE";
+        form.elements.namedItem("displayIntervalSeconds").value = String(campaign.displayIntervalSeconds || 60);
+        form.elements.namedItem("displayDurationSeconds").value = String(campaign.displayDurationSeconds || 8);
+        form.elements.namedItem("scrollDurationSeconds").value = String(campaign.scrollDurationSeconds || 28);
         document.getElementById("form-title").textContent = "Edit campaign";
         document.getElementById("save-button").textContent = "Save changes";
         document.getElementById("cancel-edit").hidden = false;

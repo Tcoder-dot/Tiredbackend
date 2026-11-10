@@ -151,10 +151,19 @@ const parseAdminAdPayload = (value: unknown) => {
   const description = String(payload.description || "").trim().slice(0, 600);
   const ctaText = String(payload.ctaText || "View offer").trim().slice(0, 60);
   const adType = String(payload.adType || "HERO_BANNER").trim().slice(0, 80);
+  const displayMode = String(payload.displayMode || "MARQUEE").trim().toUpperCase();
+  const displayModes = new Set(["MARQUEE", "POPUP"]);
   const designedBannerUrl = String(payload.designedBannerUrl || payload.rawImageUrl || "").trim().slice(0, 2048);
   const targetUrl = String(payload.targetUrl || "").trim().slice(0, 2048);
   const status = String(payload.status || "ACTIVE").trim().toUpperCase();
   const allowedStatuses = new Set(["ACTIVE", "PAUSED", "DRAFT", "PENDING_DESIGN", "EXPIRED"]);
+  const parseTiming = (raw: unknown, fallback: number, min: number, max: number, label: string) => {
+    const value = raw === undefined || raw === null || raw === "" ? fallback : Number(raw);
+    if (!Number.isInteger(value) || value < min || value > max) {
+      throw new AdminAdPayloadError(`${label} must be a whole number between ${min} and ${max} seconds.`);
+    }
+    return value;
+  };
   if (!merchantName || !headline) throw new AdminAdPayloadError("Merchant name and headline are required.");
   if (!designedBannerUrl || !isAllowedAdUrl(designedBannerUrl, false)) {
     throw new AdminAdPayloadError("Banner image must be an absolute HTTP or HTTPS URL.");
@@ -163,16 +172,27 @@ const parseAdminAdPayload = (value: unknown) => {
     throw new AdminAdPayloadError("Target URL must be an HTTP(S) URL or a site-relative path.");
   }
   if (!allowedStatuses.has(status)) throw new AdminAdPayloadError("Choose a valid campaign status.");
+  if (!displayModes.has(displayMode)) throw new AdminAdPayloadError("Choose a valid banner display mode.");
 
   const targetCities = normalizeAdTargetList(payload.targetCities);
   const targetCategories = normalizeAdTargetList(payload.targetCategories);
   const keywords = normalizeAdTargetList(payload.keywords);
+  const displayIntervalSeconds = parseTiming(payload.displayIntervalSeconds, 60, 10, 86400, "Popup interval");
+  const displayDurationSeconds = parseTiming(payload.displayDurationSeconds, 8, 3, 60, "Popup visibility duration");
+  const scrollDurationSeconds = parseTiming(payload.scrollDurationSeconds, 28, 8, 120, "Horizontal loop duration");
+  if (displayDurationSeconds > displayIntervalSeconds) {
+    throw new AdminAdPayloadError("Popup visibility duration cannot exceed its repeat interval.");
+  }
   return {
     merchantName,
     headline,
     description,
     ctaText,
     adType: adType || "HERO_BANNER",
+    displayMode,
+    displayIntervalSeconds,
+    displayDurationSeconds,
+    scrollDurationSeconds,
     designedBannerUrl,
     rawImageUrl: designedBannerUrl,
     targetUrl,
