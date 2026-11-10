@@ -1435,8 +1435,8 @@ function buildMerchantPayload(matchedVendor: any, rawParam: string = "") {
     isVerified: isVendorVerified,
     verificationStatus: getMerchantVerificationStatus(matchedVendor),
     verification_status: getMerchantVerificationStatus(matchedVendor).toLowerCase(),
-    avatarUrl: matchedVendor.avatarUrl || matchedVendor.avatar_url || matchedVendor.selfieUrl || matchedVendor.imageUrl || badgeUrl,
-    avatar_url: matchedVendor.avatar_url || matchedVendor.avatarUrl || matchedVendor.selfieUrl || matchedVendor.imageUrl || badgeUrl,
+    avatarUrl: matchedVendor.profilePhotoUrl || matchedVendor.avatarUrl || matchedVendor.avatar_url || matchedVendor.selfieUrl || matchedVendor.imageUrl || badgeUrl,
+    avatar_url: matchedVendor.profilePhotoUrl || matchedVendor.avatar_url || matchedVendor.avatarUrl || matchedVendor.selfieUrl || matchedVendor.imageUrl || badgeUrl,
     initials: matchedVendor.initials || vName.slice(0, 2).toUpperCase(),
     whatsappDeepLink: deepLink,
     products: Array.isArray(matchedVendor.products) ? matchedVendor.products : []
@@ -1634,9 +1634,15 @@ app.patch(
       ]);
       const matchingMerchantDocs = [...businesses.docs, ...merchants.docs].filter((merchantDoc) => {
         const business = merchantDoc.data();
-        return normalizeWhatsAppNumber(
-          business.whatsappNumber || business.whatsapp || business.phone || business.whatsapp_number
-        ) === requestedPhone;
+        const merchantPhones = [
+          business.whatsappNumber,
+          business.whatsapp,
+          business.phone,
+          business.whatsapp_number
+        ]
+          .map(normalizeWhatsAppNumber)
+          .filter((phone): phone is string => Boolean(phone));
+        return merchantPhones.includes(requestedPhone);
       });
       if (matchingMerchantDocs.length === 0) {
         return res.status(404).json({ success: false, error: "Merchant not found." });
