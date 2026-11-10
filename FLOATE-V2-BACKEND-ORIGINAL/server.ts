@@ -1628,24 +1628,32 @@ app.patch(
         return res.status(400).json({ success: false, error: "A valid stored business image URL is required." });
       }
 
-      const businesses = await getDocs(collection(firestoreDb, "businesses"));
-      const merchantDoc = businesses.docs.find((businessDoc) => {
-        const business = businessDoc.data();
+      const [businesses, merchants] = await Promise.all([
+        getDocs(collection(firestoreDb, "businesses")),
+        getDocs(collection(firestoreDb, "merchants"))
+      ]);
+      const matchingMerchantDocs = [...businesses.docs, ...merchants.docs].filter((merchantDoc) => {
+        const business = merchantDoc.data();
         return normalizeWhatsAppNumber(
           business.whatsappNumber || business.whatsapp || business.phone || business.whatsapp_number
         ) === requestedPhone;
       });
-      if (!merchantDoc) {
+      if (matchingMerchantDocs.length === 0) {
         return res.status(404).json({ success: false, error: "Merchant not found." });
       }
 
-      await setDoc(doc(firestoreDb, "businesses", merchantDoc.id), {
+      const update = {
         avatarUrl: imageUrl,
         avatar_url: imageUrl,
         imageUrl,
         profilePhotoUrl: imageUrl,
         updatedAt: new Date().toISOString()
-      }, { merge: true });
+      };
+      const batch = writeBatch(firestoreDb);
+      matchingMerchantDocs.forEach((merchantDoc) => {
+        batch.set(merchantDoc.ref, update, { merge: true });
+      });
+      await batch.commit();
 
       return res.json({ success: true, imageUrl });
     } catch (error: any) {
