@@ -14,11 +14,20 @@ import { ANCHOR_BUSINESSES } from "./controllers/searchController";
 import { createMerchantSlug } from "./src/utils/merchantSlug";
 import { normalizeWhatsAppNumber } from "./src/utils/whatsapp";
 import { handleWhatsAppVerification, handleWhatsAppWebhook } from "./src/bot/services/whatsappService.js";
-import { firestoreDb as adStore } from "./src/bot/services/firestoreService.js";
 import { adminAdsDashboardHtml } from "./src/adminAdsDashboard.js";
+import {
+  deleteAd,
+  getAd,
+  listAds,
+  migrateLegacyStorefrontAds,
+  recordAdEvent,
+  saveAd,
+  updateAd,
+  uploadAdImage,
+} from "./src/bot/services/adminAdStore.js";
 import { corsMiddleware } from "./src/config/cors.js";
 import { isVoiceTranscriptionConfigured, isWhatsAppAuthConfigured } from "./src/bot/config.js";
-import { getCatalogMedia, saveCatalogMedia } from "./src/bot/services/mediaStorageService.js";
+import { getCatalogMedia } from "./src/bot/services/mediaStorageService.js";
 import { SEO_HUBS_DATA } from "./src/data/seoHubs";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch } from "firebase/firestore";
@@ -52,22 +61,19 @@ app.post(["/whatsapp-webhook", "/api/whatsapp-webhook"], handleWhatsAppWebhook);
 
 const listActiveAds: express.RequestHandler = async (_req, res) => {
   try {
-    const ads = await adStore.getActiveBannerAds();
+    await migrateLegacyStorefrontAds();
+    const ads = (await listAds()).filter((ad) => ad.status === "ACTIVE");
     return res.json({ success: true, ads });
   } catch (error: any) {
+    console.error("[Ads] Failed to load active campaigns:", error);
     return res.status(503).json({ success: false, error: error.message || "Ads are unavailable." });
   }
 };
 
 const trackAdEvent = (event: "view" | "click"): express.RequestHandler => async (req, res) => {
   try {
-    const ad = await adStore.getAdDoc(req.params.id);
-    if (!ad) return res.status(404).json({ success: false, error: "Ad not found." });
-
-    const recorded = event === "view"
-      ? await adStore.recordAdImpression(req.params.id)
-      : await adStore.recordAdClick(req.params.id);
-    if (!recorded) return res.status(503).json({ success: false, error: "Ad event could not be recorded." });
+    const recorded = await recordAdEvent(req.params.id, event);
+    if (!recorded) return res.status(404).json({ success: false, error: "Ad not found." });
 
     return res.json({ success: true, recorded: true });
   } catch (error: any) {
@@ -156,11 +162,15 @@ app.get(["/", "/admin/ads"], serveAdminAdsDashboard);
 
 app.get("/api/admin/ads", requireAdminApiKey, async (_req, res) => {
   try {
-    const ads = await adStore.getAllAdsForAdmin();
+    await migrateLegacyStorefrontAds();
+    const ads = await listAds();
     return res.json({ success: true, ads, total: ads.length });
   } catch (error: any) {
     console.error("[Ads Admin] Failed to load campaigns:", error);
-    return res.status(503).json({ success: false, error: "Campaign storage is unavailable." });
+    return res.status(503).json({
+      success: false,
+      error: error?.message || "Campaign storage is unavailable.",
+    });
   }
 });
 
@@ -187,21 +197,21 @@ app.post(
       let normalizedImage: Buffer;
       try {
         normalizedImage = await sharp(req.body)
-          .resize(1200, 900, { fit: "cover", position: "centre" })
+          .resize(1200, 400, { fit: "cover", position: "centre" })
           .jpeg({ quality: 88, mozjpeg: true })
           .toBuffer();
       } catch {
         return res.status(400).json({ success: false, error: "The uploaded file could not be decoded as an image." });
       }
 
-      const saved = await saveCatalogMedia(normalizedImage, "image/jpeg", `admin_ad_${randomUUID()}.jpg`);
-      return res.status(201).json({ success: true, imageUrl: saved.publicUrl, width: 1200, height: 900 });
+      const imageUrl = await uploadAdImage(normalizedImage);
+      return res.status(201).json({ success: true, imageUrl, width: 1200, height: 400 });
     } catch (error: any) {
       if (error?.type === "entity.too.large") {
         return res.status(413).json({ success: false, error: "Image must be 8 MB or smaller." });
       }
       console.error("[Ads Admin] Failed to upload banner image:", error);
-      return res.status(503).json({ success: false, error: "Banner image storage is unavailable." });
+      return res.status(503).json({ success: false, error: error.message || "Banner image storage is unavailable." });
     }
   }
 );
@@ -219,7 +229,7 @@ app.post("/api/admin/ads", requireAdminApiKey, async (req, res) => {
       createdAt: now,
       updatedAt: now,
     };
-    await adStore.saveAdDoc(ad);
+    await saveAd(ad);
     return res.status(201).json({ success: true, message: "Campaign created.", ad });
   } catch (error: any) {
     if (error instanceof AdminAdPayloadError) {
@@ -233,7 +243,7 @@ app.post("/api/admin/ads", requireAdminApiKey, async (req, res) => {
 app.put("/api/admin/ads/:id", requireAdminApiKey, async (req, res) => {
   try {
     const id = String(req.params.id || "").trim();
-    const existing = await adStore.getAdDoc(id);
+    const existing = await getAd(id);
     if (!existing) return res.status(404).json({ success: false, error: "Campaign not found." });
     const fields = parseAdminAdPayload(req.body);
     const updated = {
@@ -245,7 +255,7 @@ app.put("/api/admin/ads/:id", requireAdminApiKey, async (req, res) => {
       createdAt: existing.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    await adStore.updateAdDoc(id, updated);
+    await updateAd(id, updated);
     return res.json({ success: true, message: "Campaign updated.", ad: updated });
   } catch (error: any) {
     if (error instanceof AdminAdPayloadError) {
@@ -259,8 +269,8 @@ app.put("/api/admin/ads/:id", requireAdminApiKey, async (req, res) => {
 app.delete("/api/admin/ads/:id", requireAdminApiKey, async (req, res) => {
   try {
     const id = String(req.params.id || "").trim();
-    if (!await adStore.getAdDoc(id)) return res.status(404).json({ success: false, error: "Campaign not found." });
-    await adStore.deleteAdDoc(id);
+    if (!await getAd(id)) return res.status(404).json({ success: false, error: "Campaign not found." });
+    await deleteAd(id);
     return res.json({ success: true, message: "Campaign deleted." });
   } catch (error: any) {
     console.error("[Ads Admin] Failed to delete campaign:", error);

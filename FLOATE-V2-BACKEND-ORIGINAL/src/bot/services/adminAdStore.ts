@@ -1,0 +1,181 @@
+import { randomUUID } from "node:crypto";
+import { applicationDefault, cert, getApps, initializeApp, type ServiceAccount } from "firebase-admin/app";
+import { FieldValue, getFirestore } from "firebase-admin/firestore";
+import { getStorage } from "firebase-admin/storage";
+import firebaseConfig from "../../../firebase-applet-config.json";
+
+type AdRecord = Record<string, unknown> & { id: string };
+
+const legacyStorefrontAds: AdRecord[] = [
+  {
+    id: "ad_cv_megahub",
+    merchantName: "Computer Village MegaHub",
+    headline: "Direct Lagos Tech Wholesale & Fast Dispatch",
+    description: "Source verified laptops, smartphones, and accessories with same-day Lagos dispatch and nationwide waybill.",
+    ctaText: "Shop now",
+    adType: "HERO_BANNER",
+    designedBannerUrl: "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?auto=format&fit=crop&w=600&h=200&q=80",
+    targetUrl: "https://floate.xyz/search?category=Smartphones%20%26%20Gadgets",
+    status: "ACTIVE",
+    targetCities: ["Lagos"],
+    targetCategories: ["Smartphones & Gadgets"],
+    keywords: ["phones", "gadgets", "wholesale"],
+    impressions: 0,
+    clicks: 0,
+    submittedVia: "ADMIN_MANUAL",
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "ad_onitsha_direct",
+    merchantName: "Onitsha Main Market Direct",
+    headline: "Premium Footwear, Shoes & Native Fashion",
+    description: "Browse verified footwear artisans and textile stalls with direct WhatsApp pricing.",
+    ctaText: "Shop now",
+    adType: "HERO_BANNER",
+    designedBannerUrl: "https://images.unsplash.com/photo-1549298916-b41d501d3772?auto=format&fit=crop&w=600&h=200&q=80",
+    targetUrl: "https://floate.xyz/search?category=Footwear%20%26%20Shoes",
+    status: "ACTIVE",
+    targetCities: ["Onitsha"],
+    targetCategories: ["Footwear & Shoes"],
+    keywords: ["shoes", "fashion", "footwear"],
+    impressions: 0,
+    clicks: 0,
+    submittedVia: "ADMIN_MANUAL",
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "ad_alaba_wholesale",
+    merchantName: "Alaba International Wholesale",
+    headline: "Home Appliances, Solar Inverters & Sound Systems",
+    description: "Direct importer catalog with verified physical warranty and doorstep delivery.",
+    ctaText: "Shop now",
+    adType: "HERO_BANNER",
+    designedBannerUrl: "https://images.unsplash.com/photo-1550009158-9ebf69173e03?auto=format&fit=crop&w=600&h=200&q=80",
+    targetUrl: "https://floate.xyz/search?category=Home%20Appliances%20%26%20Sound",
+    status: "ACTIVE",
+    targetCities: ["Lagos"],
+    targetCategories: ["Home Appliances & Sound"],
+    keywords: ["appliances", "solar", "sound"],
+    impressions: 0,
+    clicks: 0,
+    submittedVia: "ADMIN_MANUAL",
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+];
+
+function getAdminApp() {
+  const existingApp = getApps().find((app) => app.name === "floate-ads-admin");
+  if (existingApp) return existingApp;
+
+  const rawServiceAccount =
+    process.env.FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON ||
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON ||
+    process.env.GOOGLE_CREDENTIALS_JSON ||
+    process.env.GOOGLE_CREDENTIALS;
+  let credential;
+  if (rawServiceAccount) {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(rawServiceAccount) as Record<string, unknown>;
+    } catch {
+      throw new Error("Firebase Admin service-account JSON is invalid.");
+    }
+
+    if (typeof parsed.client_email !== "string" || typeof parsed.private_key !== "string") {
+      throw new Error("Firebase Admin service-account JSON must include client_email and private_key.");
+    }
+    const serviceAccount: ServiceAccount = {
+      projectId: typeof parsed.project_id === "string" ? parsed.project_id : firebaseConfig.projectId,
+      clientEmail: parsed.client_email,
+      privateKey: parsed.private_key.replace(/\\n/g, "\n"),
+    };
+    credential = cert(serviceAccount);
+  } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.K_SERVICE || process.env.GAE_ENV) {
+    credential = applicationDefault();
+  } else {
+    throw new Error("Firebase Admin credentials are not configured. Set FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON on the backend.");
+  }
+
+  return initializeApp(
+    {
+      credential,
+      projectId: process.env.FIREBASE_PROJECT_ID || firebaseConfig.projectId,
+      storageBucket: firebaseConfig.storageBucket,
+    },
+    "floate-ads-admin"
+  );
+}
+
+function adsCollection() {
+  return getFirestore(getAdminApp(), firebaseConfig.firestoreDatabaseId).collection("ads");
+}
+
+export async function migrateLegacyStorefrontAds(): Promise<void> {
+  const db = getFirestore(getAdminApp(), firebaseConfig.firestoreDatabaseId);
+  const marker = db.collection("system_migrations").doc("legacy_storefront_ads_v1");
+  await db.runTransaction(async (transaction) => {
+    const markerSnapshot = await transaction.get(marker);
+    if (markerSnapshot.exists) return;
+
+    const references = legacyStorefrontAds.map((ad) => adsCollection().doc(ad.id));
+    const existingAds = await Promise.all(references.map((reference) => transaction.get(reference)));
+    existingAds.forEach((snapshot, index) => {
+      if (!snapshot.exists) transaction.create(references[index], legacyStorefrontAds[index]);
+    });
+    transaction.create(marker, { completedAt: new Date().toISOString() });
+  });
+}
+
+export async function listAds(): Promise<AdRecord[]> {
+  const snapshot = await adsCollection().get();
+  return snapshot.docs
+    .map((document) => ({ ...document.data(), id: document.id }) as AdRecord)
+    .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
+}
+
+export async function getAd(id: string): Promise<AdRecord | null> {
+  const snapshot = await adsCollection().doc(id).get();
+  return snapshot.exists ? ({ ...snapshot.data(), id: snapshot.id } as AdRecord) : null;
+}
+
+export async function saveAd(ad: AdRecord): Promise<void> {
+  await adsCollection().doc(ad.id).set(ad);
+}
+
+export async function updateAd(id: string, updates: AdRecord): Promise<void> {
+  await adsCollection().doc(id).set(updates, { merge: true });
+}
+
+export async function deleteAd(id: string): Promise<void> {
+  await adsCollection().doc(id).delete();
+}
+
+export async function recordAdEvent(id: string, event: "view" | "click"): Promise<boolean> {
+  const ad = adsCollection().doc(id);
+  const existing = await ad.get();
+  if (!existing.exists) return false;
+  await ad.update({
+    [event === "view" ? "impressions" : "clicks"]: FieldValue.increment(1),
+  });
+  return true;
+}
+
+export async function uploadAdImage(buffer: Buffer): Promise<string> {
+  const bucket = getStorage(getAdminApp()).bucket();
+  if (!bucket.name) throw new Error("Firebase Storage bucket is not configured.");
+
+  const fileName = `catalog/admin_ad_${randomUUID()}.jpg`;
+  const downloadToken = randomUUID();
+  await bucket.file(fileName).save(buffer, {
+    resumable: false,
+    metadata: {
+      contentType: "image/jpeg",
+      metadata: { firebaseStorageDownloadTokens: downloadToken },
+    },
+  });
+
+  return `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(fileName)}?alt=media&token=${downloadToken}`;
+}

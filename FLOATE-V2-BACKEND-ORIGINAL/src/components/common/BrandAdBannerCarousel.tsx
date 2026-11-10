@@ -160,7 +160,7 @@ export const BrandAdBannerCarousel: React.FC = () => {
               </div>
 
               {/* Right Image */}
-              <div className="relative w-full sm:w-48 aspect-[4/3] rounded-xl overflow-hidden shadow-lg border border-white/20 flex-shrink-0">
+              <div className="relative w-full sm:w-48 aspect-[3/1] rounded-xl overflow-hidden shadow-lg border border-white/20 flex-shrink-0">
                 {ad.imageUrl && (
                   <img
                     src={ad.imageUrl}

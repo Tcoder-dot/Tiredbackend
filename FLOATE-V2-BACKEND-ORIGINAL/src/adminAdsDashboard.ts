@@ -34,15 +34,15 @@ export const adminAdsDashboardHtml = `<!doctype html>
     .campaigns { margin-top: 22px; }
     .campaigns-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .campaign { display: grid; grid-template-columns: 130px 1fr; gap: 16px; padding: 14px 0; border-top: 1px solid #e6ece6; }
-    .campaign img { width: 130px; aspect-ratio: 4 / 3; object-fit: cover; background: #edf2ed; border-radius: 8px; }
-    .image-preview { width: 240px; aspect-ratio: 4 / 3; object-fit: cover; border: 1px solid #dfe7df; border-radius: 8px; background: #edf2ed; }
+    .campaign img { width: 130px; aspect-ratio: 3 / 1; object-fit: cover; background: #edf2ed; border-radius: 8px; }
+    .image-preview { width: 300px; aspect-ratio: 3 / 1; object-fit: cover; border: 1px solid #dfe7df; border-radius: 8px; background: #edf2ed; }
     .campaign h3 { margin: 0; font-size: 15px; }
     .campaign p { margin: 6px 0; color: #607066; font-size: 13px; }
     .badge { display: inline-block; font-size: 11px; font-weight: 800; border-radius: 99px; padding: 3px 8px; background: #e7f5e9; color: #17662a; }
     .badge.PAUSED, .badge.DRAFT, .badge.PENDING_DESIGN { background: #fff3d6; color: #855b00; }
     .badge.EXPIRED { background: #f0f0f0; color: #555; }
     [hidden] { display: none !important; }
-    @media (max-width: 620px) { .grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } .campaign { grid-template-columns: 88px 1fr; gap: 10px; } .campaign img { width: 88px; } }
+    @media (max-width: 620px) { .grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } .campaign { grid-template-columns: 88px 1fr; gap: 10px; } .campaign img { width: 88px; } .image-preview { width: min(100%, 300px); } }
   </style>
 </head>
 <body>
@@ -71,7 +71,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
             <label class="wide">Description<textarea name="description" maxlength="600"></textarea></label>
             <label>CTA text<input name="ctaText" maxlength="60" value="View offer"></label>
             <label>Category / ad type<input name="adType" maxlength="80" value="HERO_BANNER"></label>
-            <label class="wide">Banner image file<input id="banner-image" name="bannerImage" type="file" accept="image/jpeg,image/png,image/webp" required><span id="image-help" class="muted">JPG, PNG, or WebP · maximum 8 MB. Cropped to 1200 x 900 (4:3) to match the storefront image frame.</span></label>
+            <label class="wide">Banner image file<input id="banner-image" name="bannerImage" type="file" accept="image/jpeg,image/png,image/webp" required><span id="image-help" class="muted">JPG, PNG, or WebP · maximum 8 MB. Cropped to 1200 x 400 (3:1) to match the storefront banner.</span></label>
             <div class="wide"><img id="image-preview" class="image-preview" alt="Selected banner preview" hidden></div>
             <label class="wide">Target URL<input name="targetUrl" maxlength="2048" placeholder="/search or https://..." required></label>
             <label>Target cities<input name="targetCities" placeholder="Lagos, Onitsha, Aba"></label>
@@ -224,7 +224,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
         imagePreview.removeAttribute("src");
         imagePreview.hidden = true;
         imageInput.required = true;
-        imageHelp.textContent = "JPG, PNG, or WebP · maximum 8 MB. Cropped to 1200 x 900 (4:3) to match the storefront image frame.";
+        imageHelp.textContent = "JPG, PNG, or WebP · maximum 8 MB. Cropped to 1200 x 400 (3:1) to match the storefront banner.";
         form.elements.namedItem("ctaText").value = "View offer";
         form.elements.namedItem("adType").value = "HERO_BANNER";
         form.elements.namedItem("status").value = "ACTIVE";
@@ -240,7 +240,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
         imageInput.required = false;
         imagePreview.src = currentImageUrl;
         imagePreview.hidden = !currentImageUrl;
-        imageHelp.textContent = currentImageUrl ? "Choose a new image to replace the current banner. It will be cropped to 1200 x 900 (4:3)." : "JPG, PNG, or WebP · maximum 8 MB. Cropped to 1200 x 900 (4:3) to match the storefront image frame.";
+        imageHelp.textContent = currentImageUrl ? "Choose a new image to replace the current banner. It will be cropped to 1200 x 400 (3:1)." : "JPG, PNG, or WebP · maximum 8 MB. Cropped to 1200 x 400 (3:1) to match the storefront banner.";
         for (const field of fields) {
           const value = campaign[field] ?? (field === "targetCities" ? campaign.targetLocation : field === "targetCategories" ? campaign.targetCategory : "");
           form.elements.namedItem(field).value = ["targetCities", "targetCategories", "keywords"].includes(field) ? splitList(value) : value;
