@@ -255,12 +255,6 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
     setUpdatingConditionId(null);
   };
 
-  const handleOpenWhatsappAI = () => {
-    const rawDigits = (vendor?.whatsapp_number || vendor?.phone || "08031112222").replace(/[^0-9]/g, "");
-    const intlPhone = rawDigits.startsWith("0") ? "234" + rawDigits.slice(1) : (rawDigits.startsWith("234") ? rawDigits : "234" + rawDigits);
-    window.open(`https://wa.me/2349115162081?text=${encodeURIComponent(`SYNC_CATALOG:${intlPhone}`)}`, '_blank');
-  };
-
   const handleGalleryFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -413,13 +407,6 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
             >
               <ShieldCheck className="w-4 h-4 text-[#123F16]" />
               <span>🛡️ Download Verified Kit & Assets</span>
-            </button>
-            <button
-              onClick={handleOpenWhatsappAI}
-              className="px-5 py-3.5 rounded-2xl bg-white/10 hover:bg-white/20 text-white border border-white/30 text-xs font-black transition flex items-center justify-center gap-2 cursor-pointer shadow-sm"
-            >
-              <MessageCircle className="w-4 h-4 text-[#FFC107]" />
-              <span>Sync via WhatsApp AI</span>
             </button>
           </div>
         </div>
