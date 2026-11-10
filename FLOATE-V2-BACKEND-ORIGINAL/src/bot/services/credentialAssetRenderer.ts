@@ -9,6 +9,8 @@
  */
 
 import sharp from 'sharp';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   findCredentialByFid,
   SAMPLE_CREDENTIALS,
@@ -36,6 +38,7 @@ export async function resolveCredential(fidOrPhone: string): Promise<FloateCrede
         loc: `${directMerchant.city || directMerchant.state || 'Market Hub'}, Nigeria`,
         phone: directMerchant.whatsapp,
         isPlus: Boolean(directMerchant.isVerifiedPlus),
+        photoUrl: directMerchant.profilePhotoUrl || directMerchant.photoUrl,
         customFid: cleanId.startsWith('FLT-') ? cleanId : directMerchant.certificateId,
       });
     }
@@ -67,6 +70,7 @@ export async function resolveCredential(fidOrPhone: string): Promise<FloateCrede
         loc: `${merchant.city || merchant.state || 'Market Hub'}, Nigeria`,
         phone: merchant.whatsapp,
         isPlus: Boolean(merchant.isVerifiedPlus),
+        photoUrl: merchant.profilePhotoUrl || merchant.photoUrl,
         customFid: cleanId.startsWith('FLT-') ? cleanId : merchant.certificateId,
       });
     }
@@ -294,6 +298,174 @@ export function generateCertificateSvg(cred: FloateCredential): string {
 </svg>`;
 }
 
+function wrapCertificateText(value: string, maxCharacters: number, maxLines: number): string[] {
+  const words = value.trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = '';
+
+  for (const word of words) {
+    if (word.length > maxCharacters) {
+      if (line) {
+        lines.push(line);
+        line = '';
+      }
+
+      for (let offset = 0; offset < word.length; offset += maxCharacters) {
+        const chunk = word.slice(offset, offset + maxCharacters);
+        if (chunk.length === maxCharacters) {
+          lines.push(chunk);
+        } else {
+          line = chunk;
+        }
+      }
+      continue;
+    }
+
+    const candidate = line ? `${line} ${word}` : word;
+    if (candidate.length > maxCharacters && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+
+  if (lines.length > maxLines) {
+    const visible = lines.slice(0, maxLines);
+    visible[maxLines - 1] = `${visible[maxLines - 1].slice(0, Math.max(0, maxCharacters - 1)).trimEnd()}…`;
+    return visible;
+  }
+  return lines.length ? lines : ['—'];
+}
+
+function certificateTextLines(value: string, maxCharacters: number, maxLines: number, x: number, lineHeight: number): string {
+  return wrapCertificateText(value, maxCharacters, maxLines)
+    .map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : lineHeight}">${escapeXml(line)}</tspan>`)
+    .join('');
+}
+
+async function loadCertificateImages(cred: FloateCredential): Promise<{ logo: string; photo: string }> {
+  let logo = '';
+  let photo = '';
+  try {
+    const logoPath = path.resolve(process.cwd(), 'public/brand/base-kit/layers/floate-logo.png');
+    const logoBuffer = await readFile(logoPath);
+    const trimmedLogo = await sharp(logoBuffer)
+      .trim({ background: { r: 27, g: 94, b: 32, alpha: 1 }, threshold: 16 })
+      .resize({ width: 520, height: 180, fit: 'inside' })
+      .png()
+      .toBuffer();
+    logo = `data:image/png;base64,${trimmedLogo.toString('base64')}`;
+  } catch (error) {
+    console.warn('[Credentials] Could not load the Floate logo for the certificate:', error);
+  }
+
+  if (cred.photoUrl) {
+    try {
+      const photoUrl = new URL(cred.photoUrl);
+      if (photoUrl.protocol !== 'https:' || photoUrl.hostname.toLowerCase() !== 'res.cloudinary.com') {
+        return { logo, photo };
+      }
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      try {
+        const response = await fetch(photoUrl, { signal: controller.signal });
+        const contentType = response.headers.get('content-type') || '';
+        const contentLength = Number(response.headers.get('content-length') || 0);
+        if (!response.ok || !contentType.startsWith('image/') || contentLength > 5 * 1024 * 1024) {
+          throw new Error('Merchant photo response is invalid or too large.');
+        }
+
+        const imageBuffer = Buffer.from(await response.arrayBuffer());
+        if (imageBuffer.length > 5 * 1024 * 1024) throw new Error('Merchant photo exceeds 5 MB.');
+        const optimizedPhoto = await sharp(imageBuffer)
+          .rotate()
+          .resize(320, 320, { fit: 'cover', position: 'attention' })
+          .jpeg({ quality: 84 })
+          .toBuffer();
+        photo = `data:image/jpeg;base64,${optimizedPhoto.toString('base64')}`;
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (error) {
+      console.warn('[Credentials] Could not load the merchant profile photo for the certificate:', error);
+    }
+  }
+
+  return { logo, photo };
+}
+
+function generateCompactCertificateSvg(cred: FloateCredential, logo: string, photo: string): string {
+  const businessLines = certificateTextLines(cred.biz || 'Floate Merchant', 31, 2, 370, 46);
+  const ownerLines = certificateTextLines(cred.name || 'Verified Merchant', 18, 2, 160, 28);
+  const locationLines = certificateTextLines(cred.loc || 'Nigeria', 43, 2, 370, 23);
+  const verifyLines = certificateTextLines(cred.verifyUrl || `https://floate.xyz/vendor/${cred.slug}`, 48, 2, 370, 20);
+  const fid = escapeXml(cred.fid || 'FLOATE');
+  const date = escapeXml(cred.verifiedOn || 'Recently issued');
+  const initials = escapeXml(cred.initials || 'FL');
+  const photoFallback = photo
+    ? `<image href="${photo}" x="77" y="221" width="166" height="166" preserveAspectRatio="xMidYMid slice" clip-path="url(#merchantPhotoClip)"/>`
+    : `<text x="160" y="316" text-anchor="middle" font-family="Arial, sans-serif" font-size="54" font-weight="800" fill="#FFC107">${initials}</text>`;
+  const logoMark = logo
+    ? `<image href="${logo}" x="28" y="28" width="264" height="112" preserveAspectRatio="xMidYMid meet"/>`
+    : `<text x="160" y="94" text-anchor="middle" font-family="Arial, sans-serif" font-size="42" font-weight="900" letter-spacing="3" fill="#FFC107">FLOATE</text>`;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 850" width="1200" height="850">
+  <defs>
+    <linearGradient id="certificateGreen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14532D"/>
+      <stop offset="1" stop-color="#0B2F1B"/>
+    </linearGradient>
+    <linearGradient id="certificateGold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FDE68A"/>
+      <stop offset="1" stop-color="#D4A72C"/>
+    </linearGradient>
+    <clipPath id="merchantPhotoClip"><circle cx="160" cy="304" r="83"/></clipPath>
+  </defs>
+  <rect width="1200" height="850" fill="#F3F6F1"/>
+  <rect x="14" y="14" width="1172" height="822" rx="28" fill="#FFFFFF" stroke="#D7E2D6" stroke-width="2"/>
+  <path d="M42 16h254a24 24 0 0 1 24 24v770a24 24 0 0 1-24 24H42a28 28 0 0 1-28-28V44a28 28 0 0 1 28-28Z" fill="url(#certificateGreen)"/>
+  <rect x="32" y="32" width="284" height="786" rx="20" fill="none" stroke="#D4A72C" stroke-opacity=".72" stroke-width="2"/>
+  ${logoMark}
+  <line x1="72" y1="164" x2="248" y2="164" stroke="#D4A72C" stroke-opacity=".7"/>
+  <circle cx="160" cy="304" r="91" fill="url(#certificateGold)"/>
+  <circle cx="160" cy="304" r="84" fill="#FFFFFF"/>
+  ${photoFallback}
+  <circle cx="224" cy="365" r="23" fill="#F4C84A" stroke="#FFFFFF" stroke-width="4"/>
+  <path d="m214 365 7 7 14-16" fill="none" stroke="#14532D" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="160" y="414" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="2" fill="#D9F0DD">BUSINESS OWNER</text>
+  <text x="160" y="442" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="800" fill="#FFFFFF">${ownerLines}</text>
+  <rect x="74" y="500" width="172" height="42" rx="21" fill="#FFFFFF" fill-opacity=".12" stroke="#F4C84A" stroke-opacity=".72"/>
+  <text x="160" y="527" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="800" letter-spacing="1.5" fill="#FDE68A">FLOATE VERIFIED</text>
+  <text x="160" y="772" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#D9F0DD">TRUSTED. CONNECTED. LOCAL.</text>
+
+  <text x="370" y="76" font-family="Arial, sans-serif" font-size="14" font-weight="800" letter-spacing="2.5" fill="#237044">OFFICIAL BUSINESS CREDENTIAL</text>
+  <text x="370" y="124" font-family="Arial, sans-serif" font-size="34" font-weight="900" fill="#153B26">CERTIFICATE OF VERIFICATION</text>
+  <text x="370" y="158" font-family="Arial, sans-serif" font-size="16" fill="#63746A">This certifies that the business listed below is registered on Floate.</text>
+  <text x="370" y="220" font-family="Arial, sans-serif" font-size="13" font-weight="800" letter-spacing="2" fill="#68796E">VERIFIED BUSINESS</text>
+  <text x="370" y="300" font-family="Arial, sans-serif" font-size="40" font-weight="800" fill="#123F26">${businessLines}</text>
+  <text x="370" y="414" font-family="Arial, sans-serif" font-size="20" fill="#526359">${locationLines}</text>
+  <line x1="370" y1="462" x2="1138" y2="462" stroke="#DCE5DC" stroke-width="2"/>
+
+  <rect x="370" y="492" width="230" height="102" rx="14" fill="#F4F7F2" stroke="#E1E9E0"/>
+  <text x="390" y="522" font-family="Arial, sans-serif" font-size="12" font-weight="800" letter-spacing="1.5" fill="#748276">ISSUED</text>
+  <text x="390" y="558" font-family="Arial, sans-serif" font-size="20" font-weight="800" fill="#193D28">${date}</text>
+  <rect x="616" y="492" width="282" height="102" rx="14" fill="#F4F7F2" stroke="#E1E9E0"/>
+  <text x="638" y="522" font-family="Arial, sans-serif" font-size="12" font-weight="800" letter-spacing="1.5" fill="#748276">FLOATE ID</text>
+  <text x="638" y="558" font-family="Arial, sans-serif" font-size="24" font-weight="900" fill="#9A7415">${fid}</text>
+  <rect x="914" y="492" width="224" height="102" rx="14" fill="#EAF5EC" stroke="#CFE5D2"/>
+  <text x="936" y="522" font-family="Arial, sans-serif" font-size="12" font-weight="800" letter-spacing="1.5" fill="#52715A">STATUS</text>
+  <text x="936" y="558" font-family="Arial, sans-serif" font-size="20" font-weight="900" fill="#237044">ACTIVE  ✓</text>
+
+  <text x="370" y="654" font-family="Arial, sans-serif" font-size="12" font-weight="800" letter-spacing="1.5" fill="#748276">VERIFY THIS BUSINESS</text>
+  <text x="370" y="690" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#193D28">${verifyLines}</text>
+  <text x="370" y="792" font-family="Arial, sans-serif" font-size="13" fill="#68796E">Issued by Floate • Business marketplace and trust network</text>
+  <rect x="1148" y="36" width="8" height="778" rx="4" fill="url(#certificateGold)"/>
+</svg>`;
+}
+
 /**
  * Generates 1080x1080 Square Status Boost SVG for WhatsApp Status
  */
@@ -356,9 +528,10 @@ export async function renderCredentialPng(
 
   switch (type) {
     case 'certificate':
-      svg = generateCertificateSvg(cred);
-      width = 1080;
-      height = 1920;
+      const images = await loadCertificateImages(cred);
+      svg = generateCompactCertificateSvg(cred, images.logo, images.photo);
+      width = 1200;
+      height = 850;
       filename = `Floate-Certificate-${cred.fid}.png`;
       break;
 

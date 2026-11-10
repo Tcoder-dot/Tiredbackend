@@ -5,6 +5,11 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
+import {
+  createStorefrontCheckout,
+  getStorefrontPaymentStatus,
+  processBachsWebhook
+} from "./src/bot/services/storefrontPaymentService.js";
 import { generateSitemapXML, generateRobotsTxt } from "./src/utils/sitemap";
 import searchRouter from "./routes/search";
 import v1Router, { getAllProducts } from "./routes/v1";
@@ -60,6 +65,30 @@ const requireAdminApiKey: express.RequestHandler = (req, res, next) => {
   next();
 };
 app.use(corsMiddleware);
+app.post(
+  "/api/webhooks/bachs",
+  express.raw({ type: "application/json", limit: "1mb" }),
+  async (req, res) => {
+    if (!Buffer.isBuffer(req.body)) {
+      return res.status(400).send("Expected a raw JSON webhook body.");
+    }
+
+    try {
+      await processBachsWebhook(req.body, req.headers);
+      return res.status(200).send("OK");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Webhook processing failed.";
+      if (message.includes("signature")) {
+        return res.status(401).send("Invalid webhook signature.");
+      }
+      if (message.includes("not configured")) {
+        return res.status(503).send("Bachs webhook is not configured.");
+      }
+      console.error("[Bachs Webhook] Could not process payment event:", message);
+      return res.status(503).send("Payment event could not be processed.");
+    }
+  }
+);
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
 app.get(["/whatsapp-webhook", "/api/whatsapp-webhook"], handleWhatsAppVerification);
@@ -656,6 +685,7 @@ const deliverRegistrationCertificate = async (input: {
   phone: string;
   city: string;
   state: string;
+  photoUrl?: string;
   certificateId?: string;
 }): Promise<boolean> => {
   try {
@@ -667,6 +697,7 @@ const deliverRegistrationCertificate = async (input: {
       biz: input.businessName || "Floate Merchant",
       loc: locationParts.join(", "),
       phone: input.phone,
+      photoUrl: input.photoUrl,
       customFid: input.certificateId,
     });
     const certificate = await renderCredentialPng(credential, "certificate");
@@ -807,6 +838,7 @@ app.post("/api/register/business", async (req, res) => {
           phone: intlPhone,
           city: String(city || ""),
           state: String(state || ""),
+          photoUrl: String(photo || ""),
         });
         remoteData.certificateSent = certificateSent;
       }
@@ -979,6 +1011,7 @@ app.post("/api/register/business", async (req, res) => {
       phone: intlPhone,
       city: String(city || marketHub || ""),
       state: String(state || ""),
+      photoUrl: String(photo || ""),
       certificateId: credential.fid,
     });
 
@@ -1124,14 +1157,15 @@ app.post("/api/catalog/product", async (req, res) => {
     }).length;
     const isApprovedMerchant = merchant.isVerified === true || merchant.verified === true ||
       merchant.verificationStatus === "APPROVED" || merchant.status === "ACTIVE";
-    const productLimit = isApprovedMerchant ? 7 : 2;
+    const paidProductSlots = Math.max(0, Number(merchant.paidProductSlots || 0));
+    const productLimit = 5 + paidProductSlots;
     if (currentProductCount >= productLimit) {
       return res.status(403).json({
         success: false,
         code: "PRODUCT_LIMIT_REACHED",
         limit: productLimit,
         count: currentProductCount,
-        error: `Your ${isApprovedMerchant ? "approved" : "pending"} account can list up to ${productLimit} products.`
+        error: `Your account can list up to ${productLimit} products. Buy 5 extra slots for ₦1,000 to expand your catalog.`
       });
     }
 
@@ -1376,6 +1410,7 @@ function buildMerchantPayload(matchedVendor: any, rawParam: string = "") {
     whatsappNumber: intlPhone,
     whatsapp: intlPhone,
     phone: intlPhone,
+    paidProductSlots: Math.max(0, Number(matchedVendor.paidProductSlots || 0)),
     verified: isVendorVerified,
     isVerified: isVendorVerified,
     verificationStatus: getMerchantVerificationStatus(matchedVendor),
@@ -1486,6 +1521,65 @@ app.get("/api/catalog/vendor/:phone", async (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
+
+app.post(
+  "/api/payments/bachs/checkout",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number before purchasing." });
+    }
+
+    const requestedPhone = normalizeWhatsAppNumber(req.body?.merchantPhone);
+    const authenticatedPhones = [req.user.phone, req.user.id, req.user.vendorId]
+      .map((value) => normalizeWhatsAppNumber(value))
+      .filter(Boolean);
+    if (!requestedPhone || !authenticatedPhones.includes(requestedPhone)) {
+      return res.status(403).json({ success: false, error: "You can only purchase for your own business." });
+    }
+
+    try {
+      const checkout = await createStorefrontCheckout({
+        merchantPhone: requestedPhone,
+        type: req.body?.type,
+        productId: req.body?.productId,
+        durationDays: req.body?.durationDays
+      });
+      return res.status(201).json(checkout);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Checkout could not be created.";
+      console.error("[Bachs] Failed to create merchant checkout:", message);
+      const status = message.startsWith("Bachs") ? 503 :
+        message.includes("only boost") ? 403 :
+        message.includes("not found") ? 404 : 400;
+      return res.status(status).json({ success: false, error: message });
+    }
+  }
+);
+
+app.get(
+  "/api/payments/bachs/status/:reference",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to check this payment." });
+    }
+
+    const authenticatedPhones = [req.user.phone, req.user.id, req.user.vendorId]
+      .map((value) => normalizeWhatsAppNumber(value))
+      .filter(Boolean);
+    try {
+      const payment = await getStorefrontPaymentStatus(String(req.params.reference || ""), authenticatedPhones);
+      if (!payment) return res.status(404).json({ success: false, error: "Payment reference not found." });
+      return res.json({ success: true, payment });
+    } catch (error) {
+      console.error("[Bachs] Failed to read payment status:", error);
+      return res.status(503).json({ success: false, error: "Payment status is temporarily unavailable." });
+    }
+  }
+);
 
 app.patch(
   "/api/catalog/vendor/:phone/profile-image",
@@ -4552,7 +4646,11 @@ app.get("/api/storefront/merchants/:slug", async (req, res) => {
         category: product.category || merchantData.category || "General Merchandise",
         condition: product.condition || "NEW LISTING",
         specs,
-        isBoosted: Boolean(product.isBoosted || product.is_boosted || product.boosted)
+        isBoosted: Boolean(
+          (product.isBoosted || product.is_boosted || product.boosted) &&
+          Number.isFinite(Date.parse(String(product.boostedUntil || product.boosted_until || ""))) &&
+          Date.parse(String(product.boostedUntil || product.boosted_until || "")) > Date.now()
+        )
       };
     });
 
@@ -5774,6 +5872,12 @@ async function handleWebfrontSearch(req: any, res: any) {
         };
         const verificationStatus = getMerchantVerificationStatus(productVerification);
         const isVerifiedMerchant = isMerchantVerificationApproved(productVerification);
+        const boostedUntil = Date.parse(String(p.boostedUntil || p.boosted_until || ""));
+        const isPaidBoostActive = Boolean(
+          (p.isBoosted || p.is_boosted || p.boosted) &&
+          Number.isFinite(boostedUntil) &&
+          boostedUntil > Date.now()
+        );
 
         // Check if item is located in requested location
         const isLocMatch = Boolean(effectiveLocation && (city.toLowerCase().includes(effectiveLocation.toLowerCase()) || state.toLowerCase().includes(effectiveLocation.toLowerCase())));
@@ -5791,6 +5895,9 @@ async function handleWebfrontSearch(req: any, res: any) {
           marketHub,
           city,
           state,
+          category: p.category || "General Merchandise",
+          isBoosted: isPaidBoostActive,
+          ...(isPaidBoostActive ? { boostedUntil: new Date(boostedUntil).toISOString() } : {}),
           isSameLocation: isLocMatch,
           specs: cleanSpecs.length > 0 ? cleanSpecs : ["Grade A Pristine", "Merchant Tested"],
           batteryHealth: p.batteryHealth || undefined,
@@ -5817,6 +5924,8 @@ async function handleWebfrontSearch(req: any, res: any) {
 
     // Intelligent Sorting: price matches first, higher score first, same location first
     productResults.sort((a, b) => {
+      if (a.isBoosted && !b.isBoosted) return -1;
+      if (!a.isBoosted && b.isBoosted) return 1;
       if (a.priceMatchesCriteria && !b.priceMatchesCriteria) return -1;
       if (!a.priceMatchesCriteria && b.priceMatchesCriteria) return 1;
       if (a.isSameLocation && !b.isSameLocation) return -1;
