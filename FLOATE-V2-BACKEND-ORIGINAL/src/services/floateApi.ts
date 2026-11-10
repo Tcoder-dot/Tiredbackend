@@ -1,6 +1,7 @@
 import { Product, StatusItem, Vendor } from "../types/floate";
 import { FLOATE_BACKEND_URL } from "./backendUrl";
 import { clearSearchCache } from "./searchService";
+import { createMerchantSlug } from "../utils/merchantSlug";
 
 /**
  * Backend URL configuration
@@ -200,7 +201,7 @@ export interface RegisterBusinessResponse {
  * POST ${NEXT_PUBLIC_FLOATE_API_URL}/api/register/business
  */
 export async function registerBusiness(payload: RegisterBusinessPayload): Promise<RegisterBusinessResponse> {
-  const cleanPhone = sanitizeIntlPhone(payload.phone);
+  const businessSlug = createMerchantSlug(payload.businessName);
   const bodyData = {
     businessName: payload.businessName.trim(),
     ownerName: payload.ownerName.trim(),
@@ -248,7 +249,8 @@ export async function registerBusiness(payload: RegisterBusinessPayload): Promis
     if (res.ok) {
       const data = await res.json();
       if (data.success === false) {
-        throw new Error(data.error || data.message || "Business registration was rejected");
+        const message = data.error || data.message || "Business registration was rejected";
+        return { success: false, message, error: message };
       }
 
       return {
@@ -256,7 +258,7 @@ export async function registerBusiness(payload: RegisterBusinessPayload): Promis
         message: data.message || "Business registered and awaiting verification review.",
         phone: data.phone || payload.phone,
         creditsAwarded: data.creditsAwarded || 25,
-        storeUrl: data.storeUrl || `/vendor/${cleanPhone}`,
+        storeUrl: data.storeUrl || `/vendor/${businessSlug}`,
         verificationUrl: data.verificationUrl,
         verified: data.verified ?? data.isVerified,
         isVerified: data.isVerified ?? data.verified,
@@ -264,7 +266,9 @@ export async function registerBusiness(payload: RegisterBusinessPayload): Promis
       };
     } else {
       const errData = await res.json().catch(() => null);
-      throw new Error(errData?.error || errData?.message || `Registration failed (HTTP ${res.status})`);
+      const message = errData?.error || errData?.message || `Registration failed (HTTP ${res.status})`;
+      if (res.status < 500) return { success: false, message, error: message };
+      throw new Error(message);
     }
   } catch (err: any) {
     console.warn("[Floate API] Primary registration failed, trying local fallback:", err?.message);
@@ -277,14 +281,15 @@ export async function registerBusiness(payload: RegisterBusinessPayload): Promis
       if (localRes.ok) {
         const localData = await localRes.json();
         if (localData.success === false) {
-          throw new Error(localData.error || localData.message || "Business registration was rejected");
+          const message = localData.error || localData.message || "Business registration was rejected";
+          return { success: false, message, error: message };
         }
         return {
           success: true,
           message: localData.message || "Business registered and awaiting verification review.",
           phone: localData.phone || payload.phone,
           creditsAwarded: localData.creditsAwarded || 25,
-          storeUrl: localData.storeUrl || `/vendor/${cleanPhone}`,
+          storeUrl: localData.storeUrl || `/vendor/${businessSlug}`,
           verificationUrl: localData.verificationUrl,
           verified: localData.verified ?? localData.isVerified,
           isVerified: localData.isVerified ?? localData.verified,

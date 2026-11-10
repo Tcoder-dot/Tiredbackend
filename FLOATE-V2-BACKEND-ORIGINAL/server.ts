@@ -36,7 +36,7 @@ import { renderCredentialPng, resolveCredential } from "./src/bot/services/crede
 import { createCredentialForMerchant } from "./src/bot/services/credentialService.js";
 import { SEO_HUBS_DATA } from "./src/data/seoHubs";
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch } from "firebase/firestore";
+import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch, runTransaction } from "firebase/firestore";
 import sharp from "sharp";
 import firebaseConfig from "./firebase-applet-config.json";
 
@@ -701,6 +701,39 @@ const deliverRegistrationCertificate = async (input: {
   }
 };
 
+const normalizeRegistrationName = (name: unknown): string =>
+  createMerchantSlug(String(name || ""));
+
+const findRegistrationConflict = async (businessName: string, phone: string) => {
+  const [businesses, merchants] = await Promise.all([
+    getDocs(collection(firestoreDb, "businesses")),
+    getDocs(collection(firestoreDb, "merchants")),
+  ]);
+  const requestedName = normalizeRegistrationName(businessName);
+  let nameExists = false;
+  let phoneExists = false;
+
+  for (const snapshot of [businesses, merchants]) {
+    for (const merchantDoc of snapshot.docs) {
+      const merchant = merchantDoc.data();
+      const existingName = normalizeRegistrationName(merchant.businessName || merchant.name);
+      const existingPhones = [
+        merchant.whatsappNumber,
+        merchant.whatsapp,
+        merchant.whatsapp_number,
+        merchant.phone,
+      ].map(normalizeWhatsAppNumber).filter(Boolean);
+
+      if (existingName && existingName === requestedName) nameExists = true;
+      if (existingPhones.includes(phone)) phoneExists = true;
+      if (nameExists && phoneExists) break;
+    }
+    if (nameExists && phoneExists) break;
+  }
+
+  return { nameExists, phoneExists };
+};
+
 // Registration Endpoint: POST /api/register/business
 app.post("/api/register/business", async (req, res) => {
   const { 
@@ -725,6 +758,30 @@ app.post("/api/register/business", async (req, res) => {
   const cleanDigits = String(phone || "").replace(/[^0-9]/g, "");
   const intlPhone = cleanDigits.startsWith("0") ? "234" + cleanDigits.slice(1) : (cleanDigits.startsWith("234") ? cleanDigits : "234" + cleanDigits);
   const photo = profileImageUrl || selfieUrl || profilePhoto || "";
+  const merchantSlug = normalizeRegistrationName(businessName);
+
+  if (!merchantSlug || !normalizeWhatsAppNumber(phone)) {
+    return res.status(400).json({ success: false, error: "Enter a valid business name and WhatsApp number." });
+  }
+
+  try {
+    const conflict = await findRegistrationConflict(String(businessName), intlPhone);
+    if (conflict.nameExists || conflict.phoneExists) {
+      const message = conflict.nameExists && conflict.phoneExists
+        ? "A business with this name and WhatsApp number already exists."
+        : conflict.nameExists
+          ? "A business with this name already exists. Please choose another business name."
+          : "This WhatsApp number is already registered to a business.";
+      return res.status(409).json({
+        success: false,
+        code: conflict.nameExists && conflict.phoneExists ? "BUSINESS_AND_PHONE_EXISTS" : conflict.nameExists ? "BUSINESS_NAME_EXISTS" : "PHONE_EXISTS",
+        error: message,
+      });
+    }
+  } catch (error) {
+    console.error("[Registration] Could not verify business name and phone uniqueness:", error);
+    return res.status(503).json({ success: false, error: "Registration could not verify the business name and WhatsApp number. Please try again." });
+  }
 
   if (REMOTE_BACKEND) {
     try {
@@ -753,6 +810,7 @@ app.post("/api/register/business", async (req, res) => {
         });
         remoteData.certificateSent = certificateSent;
       }
+      remoteData.storeUrl = `/vendor/${merchantSlug}`;
       return res.status(remoteRes.status).json(remoteData);
     } catch (e) {
       console.error("[Server] Configured upstream registration failed:", e);
@@ -796,10 +854,10 @@ app.post("/api/register/business", async (req, res) => {
         merchantName: businessName,
         vendorName: businessName,
         seller: businessName,
-        merchantSlug: createMerchantSlug(businessName),
-        slug: createMerchantSlug(businessName),
-        vendor_slug: intlPhone,
-        vendorSlug: createMerchantSlug(businessName),
+        merchantSlug,
+        slug: merchantSlug,
+        vendor_slug: merchantSlug,
+        vendorSlug: merchantSlug,
         vendorId: docId,
         vendorPhone: intlPhone,
         whatsapp: intlPhone,
@@ -818,17 +876,6 @@ app.post("/api/register/business", async (req, res) => {
       };
       initialProductList.push(prodItem);
 
-      // Also persist to products collection for direct query access
-      await setDoc(doc(firestoreDb, "products", prodItem.id), {
-        ...prodItem,
-        vendorId: docId,
-        vendorSlug: intlPhone,
-        vendorPhone: intlPhone,
-        vendorName: businessName,
-        city: city || "Lagos",
-        state: state || "Nigeria",
-        createdAt: new Date().toISOString()
-      }, { merge: true });
     }
 
     const credentialLocation = [city || marketHub, state].filter(Boolean);
@@ -842,7 +889,7 @@ app.post("/api/register/business", async (req, res) => {
     });
     const businessData = {
       id: docId,
-      slug: intlPhone,
+      slug: merchantSlug,
       businessName: businessName || "Market Merchant",
       name: businessName || "Market Merchant",
       ownerName: ownerName || "",
@@ -875,7 +922,55 @@ app.post("/api/register/business", async (req, res) => {
       createdAt: new Date().toISOString()
     };
 
-    await setDoc(doc(firestoreDb, "businesses", docId), businessData, { merge: true });
+    const registrationNameKey = doc(firestoreDb, "business_registration_keys", `name_${merchantSlug}`);
+    const registrationPhoneKey = doc(firestoreDb, "business_registration_keys", `phone_${intlPhone}`);
+    const businessRef = doc(firestoreDb, "businesses", docId);
+    const productRef = initialProductList[0]
+      ? doc(firestoreDb, "products", initialProductList[0].id)
+      : null;
+    const createdAt = new Date().toISOString();
+    const registrationResult = await runTransaction(firestoreDb, async (transaction) => {
+      const [nameKeySnapshot, phoneKeySnapshot] = await Promise.all([
+        transaction.get(registrationNameKey),
+        transaction.get(registrationPhoneKey),
+      ]);
+      if (nameKeySnapshot.exists() || phoneKeySnapshot.exists()) {
+        return {
+          conflict: true,
+          nameExists: nameKeySnapshot.exists(),
+          phoneExists: phoneKeySnapshot.exists(),
+        };
+      }
+
+      transaction.set(registrationNameKey, { businessName, phone: intlPhone, createdAt });
+      transaction.set(registrationPhoneKey, { businessName, phone: intlPhone, createdAt });
+      transaction.set(businessRef, businessData, { merge: true });
+      if (productRef && initialProductList[0]) {
+        transaction.set(productRef, {
+          ...initialProductList[0],
+          vendorId: docId,
+          vendorSlug: merchantSlug,
+          vendorPhone: intlPhone,
+          vendorName: businessName,
+          city: city || "Lagos",
+          state: state || "Nigeria",
+          createdAt,
+        }, { merge: true });
+      }
+      return { conflict: false, nameExists: false, phoneExists: false };
+    });
+    if (registrationResult.conflict) {
+      const message = registrationResult.nameExists && registrationResult.phoneExists
+        ? "A business with this name and WhatsApp number already exists."
+        : registrationResult.nameExists
+          ? "A business with this name already exists. Please choose another business name."
+          : "This WhatsApp number is already registered to a business.";
+      return res.status(409).json({
+        success: false,
+        code: registrationResult.nameExists && registrationResult.phoneExists ? "BUSINESS_AND_PHONE_EXISTS" : registrationResult.nameExists ? "BUSINESS_NAME_EXISTS" : "PHONE_EXISTS",
+        error: message,
+      });
+    }
 
     console.log(`[Floate OS] Automatically Verified New Merchant: ${businessName} (${intlPhone}) in ${marketHub || city}.`);
     const certificateSent = await deliverRegistrationCertificate({
@@ -892,9 +987,9 @@ app.post("/api/register/business", async (req, res) => {
       message: "Business successfully registered and 100% verified automatically!",
       certificateSent,
       phone: intlPhone,
+      storeUrl: `/vendor/${merchantSlug}`,
       verified: true,
       isVerified: true,
-      storeUrl: `/${intlPhone}`
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
@@ -1072,7 +1167,7 @@ app.post("/api/catalog/product", async (req, res) => {
       seller: businessName,
       merchantSlug,
       slug: merchantSlug,
-      vendor_slug: normalizedVendorPhone,
+      vendor_slug: merchantSlug,
       vendorSlug: merchantSlug,
       vendorId: merchantDoc.id,
       vendorPhone: normalizedVendorPhone,

@@ -18,6 +18,7 @@ import {
   Zap,
   Gift
 } from 'lucide-react';
+import { createMerchantSlug } from '../utils/merchantSlug';
 
 const NIGERIAN_STATES = [
   'Lagos', 'Abuja (FCT)', 'Anambra', 'Enugu', 'Kano', 'Oyo', 'Rivers', 'Abia',
@@ -189,7 +190,7 @@ export function StorefrontRegistration() {
       }
 
       const canonicalPhone = clean.startsWith('0') ? `234${clean.slice(1)}` : clean;
-      const storeUrl = data.storeUrl || `${window.location.origin}/vendor/${canonicalPhone}`;
+      const storeUrl = data.storeUrl || `${window.location.origin}/vendor/${createMerchantSlug(businessName)}`;
 
       setSuccessData({
         storeUrl,
