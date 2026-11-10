@@ -248,16 +248,20 @@ export interface AdDoc {
   id: string; // e.g. ad_123456
   merchantPhone?: string;
   merchantName?: string;
-  adType: 'BUSINESS_AD' | 'PRODUCT_AD' | 'SALES_AD' | 'BRAND_SPONSOR' | 'CATEGORY_SPONSOR' | 'HERO_BANNER';
+  adType: string;
   headline: string;
   description?: string;
+  ctaText?: string;
   offerText?: string;
   rawImageUrl?: string;
   designedBannerUrl?: string;
   targetUrl?: string;
   targetCategory?: string;
   targetLocation?: string;
-  status: 'PENDING_DESIGN' | 'ACTIVE' | 'PAUSED' | 'EXPIRED';
+  targetCities?: string[];
+  targetCategories?: string[];
+  keywords?: string[];
+  status: 'PENDING_DESIGN' | 'ACTIVE' | 'PAUSED' | 'EXPIRED' | 'DRAFT';
   impressions: number;
   clicks: number;
   budget?: number;
@@ -5036,18 +5040,13 @@ export class FirestoreService {
    * Get all ads for admin dashboard
    */
   public async getAllAdsForAdmin(): Promise<AdDoc[]> {
-    try {
-      const snap = await getDocs(collection(db, 'ads'));
-      const list: AdDoc[] = [];
-      snap.forEach((d) => {
-        const listData = d.data() as AdDoc;
-        list.push({ ...listData, id: d.id });
-      });
-      return list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-    } catch (e) {
-      console.warn('[Firestore] getAllAdsForAdmin error:', e);
-      return [];
-    }
+    const snap = await getDocs(collection(db, 'ads'));
+    const list: AdDoc[] = [];
+    snap.forEach((d) => {
+      const listData = d.data() as AdDoc;
+      list.push({ ...listData, id: d.id });
+    });
+    return list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   }
 
   /**

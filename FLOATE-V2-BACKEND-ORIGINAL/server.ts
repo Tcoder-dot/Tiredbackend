@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { readFile } from "node:fs/promises";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
@@ -15,12 +15,14 @@ import { createMerchantSlug } from "./src/utils/merchantSlug";
 import { normalizeWhatsAppNumber } from "./src/utils/whatsapp";
 import { handleWhatsAppVerification, handleWhatsAppWebhook } from "./src/bot/services/whatsappService.js";
 import { firestoreDb as adStore } from "./src/bot/services/firestoreService.js";
+import { adminAdsDashboardHtml } from "./src/adminAdsDashboard.js";
 import { corsMiddleware } from "./src/config/cors.js";
 import { isVoiceTranscriptionConfigured, isWhatsAppAuthConfigured } from "./src/bot/config.js";
-import { getCatalogMedia } from "./src/bot/services/mediaStorageService.js";
+import { getCatalogMedia, saveCatalogMedia } from "./src/bot/services/mediaStorageService.js";
 import { SEO_HUBS_DATA } from "./src/data/seoHubs";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch } from "firebase/firestore";
+import sharp from "sharp";
 import firebaseConfig from "./firebase-applet-config.json";
 
 dotenv.config();
@@ -76,6 +78,193 @@ const trackAdEvent = (event: "view" | "click"): express.RequestHandler => async 
 app.get(["/api/ads/banner", "/api/v1/ads/banner", "/api/v1/ads"], listActiveAds);
 app.post(["/api/ads/:id/view", "/api/v1/ads/:id/view"], trackAdEvent("view"));
 app.post(["/api/ads/:id/click", "/api/v1/ads/:id/click"], trackAdEvent("click"));
+
+const normalizeAdTargetList = (value: unknown): string[] => {
+  const entries = Array.isArray(value) ? value : String(value || "").split(/[,;|\n]/);
+  return entries
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .slice(0, 50)
+    .map((item) => item.slice(0, 80));
+};
+
+class AdminAdPayloadError extends Error {}
+
+const isAllowedAdUrl = (value: string, allowRelative: boolean): boolean => {
+  if (allowRelative && value.startsWith("/") && !value.startsWith("//")) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+};
+
+const parseAdminAdPayload = (value: unknown) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new AdminAdPayloadError("Campaign details are required.");
+  }
+  const payload = value as Record<string, unknown>;
+  const merchantName = String(payload.merchantName || "").trim().slice(0, 120);
+  const headline = String(payload.headline || "").trim().slice(0, 180);
+  const description = String(payload.description || "").trim().slice(0, 600);
+  const ctaText = String(payload.ctaText || "View offer").trim().slice(0, 60);
+  const adType = String(payload.adType || "HERO_BANNER").trim().slice(0, 80);
+  const designedBannerUrl = String(payload.designedBannerUrl || payload.rawImageUrl || "").trim().slice(0, 2048);
+  const targetUrl = String(payload.targetUrl || "").trim().slice(0, 2048);
+  const status = String(payload.status || "ACTIVE").trim().toUpperCase();
+  const allowedStatuses = new Set(["ACTIVE", "PAUSED", "DRAFT", "PENDING_DESIGN", "EXPIRED"]);
+  if (!merchantName || !headline) throw new AdminAdPayloadError("Merchant name and headline are required.");
+  if (!designedBannerUrl || !isAllowedAdUrl(designedBannerUrl, false)) {
+    throw new AdminAdPayloadError("Banner image must be an absolute HTTP or HTTPS URL.");
+  }
+  if (!targetUrl || !isAllowedAdUrl(targetUrl, true)) {
+    throw new AdminAdPayloadError("Target URL must be an HTTP(S) URL or a site-relative path.");
+  }
+  if (!allowedStatuses.has(status)) throw new AdminAdPayloadError("Choose a valid campaign status.");
+
+  const targetCities = normalizeAdTargetList(payload.targetCities);
+  const targetCategories = normalizeAdTargetList(payload.targetCategories);
+  const keywords = normalizeAdTargetList(payload.keywords);
+  return {
+    merchantName,
+    headline,
+    description,
+    ctaText,
+    adType: adType || "HERO_BANNER",
+    designedBannerUrl,
+    rawImageUrl: designedBannerUrl,
+    targetUrl,
+    targetCities,
+    targetCategories,
+    keywords,
+    targetCategory: targetCategories[0] || "",
+    targetLocation: targetCities[0] || "",
+    status: status as "ACTIVE" | "PAUSED" | "DRAFT" | "PENDING_DESIGN" | "EXPIRED",
+  };
+};
+
+app.get("/admin/ads", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' https: http:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+  return res.type("html").send(adminAdsDashboardHtml);
+});
+
+app.get("/api/admin/ads", requireAdminApiKey, async (_req, res) => {
+  try {
+    const ads = await adStore.getAllAdsForAdmin();
+    return res.json({ success: true, ads, total: ads.length });
+  } catch (error: any) {
+    console.error("[Ads Admin] Failed to load campaigns:", error);
+    return res.status(503).json({ success: false, error: "Campaign storage is unavailable." });
+  }
+});
+
+app.post(
+  "/api/admin/ads/image",
+  requireAdminApiKey,
+  express.raw({ type: () => true, limit: "8mb" }),
+  async (req, res) => {
+    try {
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        return res.status(400).json({ success: false, error: "Select an image file to upload." });
+      }
+
+      const mimeType = String(req.get("content-type") || "").split(";")[0].trim().toLowerCase();
+      const signatures: Record<string, (buffer: Buffer) => boolean> = {
+        "image/jpeg": (buffer) => buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff,
+        "image/png": (buffer) => buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+        "image/webp": (buffer) => buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP",
+      };
+      if (!signatures[mimeType] || !signatures[mimeType](req.body)) {
+        return res.status(400).json({ success: false, error: "Upload a valid JPG, PNG, or WebP image." });
+      }
+
+      let normalizedImage: Buffer;
+      try {
+        normalizedImage = await sharp(req.body)
+          .resize(1200, 900, { fit: "cover", position: "centre" })
+          .jpeg({ quality: 88, mozjpeg: true })
+          .toBuffer();
+      } catch {
+        return res.status(400).json({ success: false, error: "The uploaded file could not be decoded as an image." });
+      }
+
+      const saved = await saveCatalogMedia(normalizedImage, "image/jpeg", `admin_ad_${randomUUID()}.jpg`);
+      return res.status(201).json({ success: true, imageUrl: saved.publicUrl, width: 1200, height: 900 });
+    } catch (error: any) {
+      if (error?.type === "entity.too.large") {
+        return res.status(413).json({ success: false, error: "Image must be 8 MB or smaller." });
+      }
+      console.error("[Ads Admin] Failed to upload banner image:", error);
+      return res.status(503).json({ success: false, error: "Banner image storage is unavailable." });
+    }
+  }
+);
+
+app.post("/api/admin/ads", requireAdminApiKey, async (req, res) => {
+  try {
+    const fields = parseAdminAdPayload(req.body);
+    const now = new Date().toISOString();
+    const ad = {
+      ...fields,
+      id: `ad_${randomUUID()}`,
+      impressions: 0,
+      clicks: 0,
+      submittedVia: "ADMIN_MANUAL" as const,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await adStore.saveAdDoc(ad);
+    return res.status(201).json({ success: true, message: "Campaign created.", ad });
+  } catch (error: any) {
+    if (error instanceof AdminAdPayloadError) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+    console.error("[Ads Admin] Failed to create campaign:", error);
+    return res.status(503).json({ success: false, error: "Campaign could not be saved." });
+  }
+});
+
+app.put("/api/admin/ads/:id", requireAdminApiKey, async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    const existing = await adStore.getAdDoc(id);
+    if (!existing) return res.status(404).json({ success: false, error: "Campaign not found." });
+    const fields = parseAdminAdPayload(req.body);
+    const updated = {
+      ...fields,
+      id,
+      impressions: Number(existing.impressions || 0),
+      clicks: Number(existing.clicks || 0),
+      submittedVia: existing.submittedVia || "ADMIN_MANUAL",
+      createdAt: existing.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await adStore.updateAdDoc(id, updated);
+    return res.json({ success: true, message: "Campaign updated.", ad: updated });
+  } catch (error: any) {
+    if (error instanceof AdminAdPayloadError) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+    console.error("[Ads Admin] Failed to update campaign:", error);
+    return res.status(503).json({ success: false, error: "Campaign could not be updated." });
+  }
+});
+
+app.delete("/api/admin/ads/:id", requireAdminApiKey, async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!await adStore.getAdDoc(id)) return res.status(404).json({ success: false, error: "Campaign not found." });
+    await adStore.deleteAdDoc(id);
+    return res.json({ success: true, message: "Campaign deleted." });
+  } catch (error: any) {
+    console.error("[Ads Admin] Failed to delete campaign:", error);
+    return res.status(503).json({ success: false, error: "Campaign could not be deleted." });
+  }
+});
 
 app.get("/api/media/:mediaId", async (req, res) => {
   try {

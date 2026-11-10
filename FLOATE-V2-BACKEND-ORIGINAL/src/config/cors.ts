@@ -33,6 +33,7 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction) 
   const hostname = requestOrigin?.hostname.toLowerCase() || '';
   const isAllowed = !origin || Boolean(
     requestOrigin && (
+      requestOrigin.host === req.get('host')?.toLowerCase() ||
       allowedOrigins.has(requestOrigin.origin) ||
       hostname === 'floate.xyz' ||
       hostname.endsWith('.floate.xyz') ||
@@ -57,7 +58,7 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction) 
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE, PATCH');
   res.header(
     'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-session-token, x-api-key, x-floate-api-key'
+    'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-session-token, x-api-key, x-floate-api-key, x-admin-api-key'
   );
 
   if (req.method === 'OPTIONS') {
