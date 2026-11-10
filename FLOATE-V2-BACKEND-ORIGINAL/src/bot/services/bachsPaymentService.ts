@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { firestoreDb, AdDoc } from './firestoreService.js';
 import { sendWhatsAppMessage } from './whatsappService.js';
 import { config } from '../config.js';
+import { buildMerchantProfileUrl } from '../../config/siteUrls.js';
 
 export interface BachsPaymentPackage {
   id: 'HERO_BANNER' | 'CATEGORY_SPOTLIGHT' | 'SEARCH_BOOST';
@@ -166,7 +167,7 @@ export class BachsPaymentService {
       offerText: offerText || 'Limited Offer',
       rawImageUrl: rawImageUrl || '',
       designedBannerUrl: rawImageUrl || '',
-      targetUrl: targetUrl || `https://floate.xyz/vendor/${cleanPhone}`,
+      targetUrl: targetUrl || buildMerchantProfileUrl(merchantName || cleanPhone),
       targetCategory: targetCategory || 'General',
       targetLocation: targetLocation || 'Nigeria',
       status: 'PENDING_DESIGN', // PENDING_DESIGN -> PAID -> ACTIVE

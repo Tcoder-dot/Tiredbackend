@@ -1354,7 +1354,7 @@ export async function startFloateDirectHandoff(
     console.warn('[Direct Customer Credit Deduction Warning]:', err);
   }
 
-  const vendorStoreUrl = `${getFrontendWebUrl()}/vendor/${vendorPhone}`;
+  const vendorStoreUrl = buildMerchantProfileUrl(bizName);
 
   let vendorDetailMsg =
     `*Vendor Details*\n` +
@@ -4805,7 +4805,7 @@ export async function processMasterWhatsAppEngine(params: {
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     });
 
-    const webStoreUrl = `${getFrontendWebUrl()}/vendor/${cleanPhone}`;
+    const webStoreUrl = buildMerchantProfileUrl(merchant?.businessName || cleanPhone);
     await sendWhatsAppMessage(
       cleanPhone,
       `✨ *24-Hour Status Story Published!* 📲\n` +
@@ -9657,7 +9657,7 @@ async function finalizeAndPublishProduct(
   checkAndNotifyReferralUnlock(toPhone, bizName);
 
   const productPermalink = buildProductUrl(savedProd.id, bizName);
-  const webStoreUrl = `${getFrontendWebUrl()}/vendor/${toPhone}`;
+  const webStoreUrl = buildMerchantProfileUrl(bizName);
 
   updateWhatsAppSession(toPhone, {
     state: 'VENDOR_PORTAL',
