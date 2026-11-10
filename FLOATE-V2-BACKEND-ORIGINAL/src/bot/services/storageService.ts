@@ -2,6 +2,7 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import path from 'path';
 import fs from 'fs';
+import { uploadImageToCloudinary } from './cloudinaryService.js';
 
 const defaultConfig = {
   projectId: "gen-lang-client-0100438151",
@@ -37,6 +38,7 @@ export async function uploadTelegramMediaToStorage(
   destinationPath: string,
   mimeType: string = 'image/jpeg'
 ): Promise<string> {
+  const isProductImage = destinationPath.startsWith('products/') && mimeType.startsWith('image/');
   try {
     const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
     const response = await fetch(fileUrl);
@@ -46,6 +48,15 @@ export async function uploadTelegramMediaToStorage(
 
     const arrayBuffer = await response.arrayBuffer();
     const buffer = new Uint8Array(arrayBuffer);
+
+    if (isProductImage) {
+      const fileName = path.basename(destinationPath).replace(/\.[^.]+$/, '');
+      return await uploadImageToCloudinary(buffer, {
+        folder: 'floate/products',
+        publicId: fileName,
+        mimeType,
+      });
+    }
 
     const storageRef = ref(storage, destinationPath);
     await uploadBytes(storageRef, buffer, {
@@ -58,31 +69,27 @@ export async function uploadTelegramMediaToStorage(
     const downloadUrl = await getDownloadURL(storageRef);
     return downloadUrl;
   } catch (err: any) {
+    if (isProductImage) throw err;
     console.warn(`[Firebase Storage Upload Notice] Storage upload fallback for ${destinationPath}:`, err?.message || err);
     // Fallback: return a data or telegram file path reference if storage bucket is in cold-start
     return `https://api.telegram.org/file/bot${botToken}/${filePath}`;
   }
 }
 
-/**
- * Direct buffer upload to Firebase Storage
- */
-export async function uploadBufferToStorage(
+export async function uploadBufferToCloudinary(
   buffer: Buffer | Uint8Array,
   destinationPath: string,
   mimeType: string = 'image/jpeg'
 ): Promise<string> {
   try {
-    const storageRef = ref(storage, destinationPath);
-    await uploadBytes(storageRef, buffer, {
-      contentType: mimeType,
-      customMetadata: {
-        uploadedAt: new Date().toISOString(),
-      },
+    const fileName = path.basename(destinationPath).replace(/\.[^.]+$/, '');
+    return await uploadImageToCloudinary(buffer, {
+      folder: path.posix.dirname(destinationPath).replace(/^\/+|\/+$/g, '') || 'floate',
+      publicId: fileName,
+      mimeType,
     });
-    return await getDownloadURL(storageRef);
   } catch (err: any) {
-    console.warn(`[Buffer Storage Upload Notice]`, err?.message || err);
+    console.warn(`[Cloudinary Buffer Upload Notice]`, err?.message || err);
     return '';
   }
 }

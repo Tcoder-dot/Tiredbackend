@@ -9,7 +9,7 @@ import { Product, Vendor } from "../../types/floate";
 import { LoadingScreen } from "../common/LoadingScreen";
 import { MerchantAssetsModal } from "./MerchantAssetsModal";
 import { PricingUpgradeMatrix } from "../PricingUpgradeMatrix";
-import { addCatalogProduct, getVendor, updateCatalogProduct, updateCatalogProductCondition } from "../../services/floateApi";
+import { addCatalogProduct, getVendor, updateCatalogProduct, updateCatalogProductCondition, uploadCatalogProductImage } from "../../services/floateApi";
 import { buildProductUrl } from "../../utils/productUrl";
 
 interface MerchantDashboardProps {
@@ -36,7 +36,7 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   const [newPrice, setNewPrice] = useState("");
   const [newCategory, setNewCategory] = useState("Gadgets & Phones");
   const [newCondition, setNewCondition] = useState<"new" | "used" | "refurbished" | "">("");
-  const [newPhotoBase64, setNewPhotoBase64] = useState<string>("");
+  const [newPhotoFile, setNewPhotoFile] = useState<File | null>(null);
   const [newPhotoPreview, setNewPhotoPreview] = useState<string>("");
   const [newDescription, setNewDescription] = useState("");
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
@@ -51,6 +51,11 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   const isRejectedMerchant = verificationStatus === "REJECTED";
   const productLimit = isApprovedMerchant ? 7 : 2;
   const productLimitReached = products.length >= productLimit;
+
+  useEffect(() => {
+    if (!newPhotoPreview.startsWith("blob:")) return;
+    return () => URL.revokeObjectURL(newPhotoPreview);
+  }, [newPhotoPreview]);
 
   useEffect(() => {
     const loadData = async () => {
@@ -134,13 +139,16 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
     setIsLoading(true);
     setProductError("");
     try {
+      const productImageUrl = newPhotoFile
+        ? await uploadCatalogProductImage(newPhotoFile)
+        : undefined;
       const payload = {
         vendorPhone,
         name: newTitle.trim(),
         price: newPrice,
         description: newDescription.trim(),
         category: newCategory,
-        imageUrl: newPhotoBase64 || undefined,
+        imageUrl: productImageUrl,
         condition: newCondition || undefined
       };
       const result = editingProductId
@@ -155,8 +163,9 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
         : [result.product!, ...current]);
       setNewTitle("");
       setNewPrice("");
-      setNewPhotoBase64("");
+      setNewPhotoFile(null);
       setNewPhotoPreview("");
+      if (galleryFileInputRef.current) galleryFileInputRef.current.value = "";
       setNewDescription("");
       setNewCondition("");
       setEditingProductId(null);
@@ -181,7 +190,8 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
         ? product.condition
         : ""
     );
-    setNewPhotoBase64("");
+    setNewPhotoFile(null);
+    if (galleryFileInputRef.current) galleryFileInputRef.current.value = "";
     setNewPhotoPreview(product.photo_url || "");
     setNewDescription(product.description || "");
     setProductError("");
@@ -193,7 +203,8 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
     setEditingProductId(null);
     setNewTitle("");
     setNewPrice("");
-    setNewPhotoBase64("");
+    setNewPhotoFile(null);
+    if (galleryFileInputRef.current) galleryFileInputRef.current.value = "";
     setNewPhotoPreview("");
     setNewDescription("");
     setNewCondition("");
@@ -253,14 +264,19 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   const handleGalleryFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = reader.result as string;
-      setNewPhotoBase64(base64);
-      setNewPhotoPreview(base64);
-    };
-    reader.readAsDataURL(file);
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      setProductError("Choose a JPG, PNG, or WebP product image.");
+      e.target.value = "";
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setProductError("Product images must be 8 MB or smaller.");
+      e.target.value = "";
+      return;
+    }
+    setProductError("");
+    setNewPhotoFile(file);
+    setNewPhotoPreview(URL.createObjectURL(file));
   };
 
   if (isLoading) {
@@ -594,7 +610,7 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
                       <label className="text-xs font-extrabold text-[#123F16]/80">Product Photo Upload</label>
                       <input
                         type="file"
-                        accept="image/*"
+                        accept="image/jpeg,image/png,image/webp"
                         ref={galleryFileInputRef}
                         onChange={handleGalleryFileSelect}
                         className="hidden"
@@ -615,7 +631,11 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
                       <img src={newPhotoPreview} alt="Preview" className="w-full h-full object-cover" />
                       <button
                         type="button"
-                        onClick={() => { setNewPhotoPreview(""); setNewPhotoBase64(""); }}
+                        onClick={() => {
+                          setNewPhotoPreview("");
+                          setNewPhotoFile(null);
+                          if (galleryFileInputRef.current) galleryFileInputRef.current.value = "";
+                        }}
                         className="absolute top-1 right-1 bg-black/60 text-white rounded-full p-1"
                       >
                         <X className="w-3 h-3" />

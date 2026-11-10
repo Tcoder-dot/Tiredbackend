@@ -351,6 +351,23 @@ export interface AddProductPayload {
   condition?: "new" | "used" | "refurbished";
 }
 
+export async function uploadCatalogProductImage(file: File): Promise<string> {
+  const response = await fetch(`${FLOATE_API_URL}/api/catalog/product/image`, {
+    method: "POST",
+    headers: {
+      "Accept": "application/json",
+      "Content-Type": file.type,
+      "x-api-key": FLOATE_API_KEY
+    },
+    body: file
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success || typeof data.imageUrl !== "string") {
+    throw new Error(data.error || `Product image upload failed (HTTP ${response.status}).`);
+  }
+  return data.imageUrl;
+}
+
 /**
  * 2. Add New Catalog Product API
  * POST ${NEXT_PUBLIC_FLOATE_API_URL}/api/catalog/product

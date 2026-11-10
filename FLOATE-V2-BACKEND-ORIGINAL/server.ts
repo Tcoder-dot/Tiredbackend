@@ -28,6 +28,7 @@ import {
 import { corsMiddleware } from "./src/config/cors.js";
 import { isVoiceTranscriptionConfigured, isWhatsAppAuthConfigured } from "./src/bot/config.js";
 import { getCatalogMedia } from "./src/bot/services/mediaStorageService.js";
+import { uploadImageToCloudinary } from "./src/bot/services/cloudinaryService.js";
 import { SEO_HUBS_DATA } from "./src/data/seoHubs";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch } from "firebase/firestore";
@@ -154,7 +155,7 @@ const serveAdminAdsDashboard: express.RequestHandler = (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
-  res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' https: http:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+  res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' https: http: blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
   return res.type("html").send(adminAdsDashboardHtml);
 };
 
@@ -212,6 +213,51 @@ app.post(
       }
       console.error("[Ads Admin] Failed to upload banner image:", error);
       return res.status(503).json({ success: false, error: error.message || "Banner image storage is unavailable." });
+    }
+  }
+);
+
+app.post(
+  "/api/catalog/product/image",
+  express.raw({ type: () => true, limit: "8mb" }),
+  async (req, res) => {
+    const expectedKey = Buffer.from(process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6");
+    const providedKey = Buffer.from(req.get("x-api-key") || "");
+    if (providedKey.length !== expectedKey.length || !timingSafeEqual(providedKey, expectedKey)) {
+      return res.status(401).json({ success: false, error: "API authentication required." });
+    }
+
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ success: false, error: "Select a product image to upload." });
+    }
+
+    const mimeType = String(req.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const signatures: Record<string, (buffer: Buffer) => boolean> = {
+      "image/jpeg": (buffer) => buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff,
+      "image/png": (buffer) => buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+      "image/webp": (buffer) => buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP",
+    };
+    if (!signatures[mimeType] || !signatures[mimeType](req.body)) {
+      return res.status(400).json({ success: false, error: "Upload a valid JPG, PNG, or WebP image." });
+    }
+
+    try {
+      const normalizedImage = await sharp(req.body)
+        .rotate()
+        .resize(1600, 1600, { fit: "inside", withoutEnlargement: true })
+        .jpeg({ quality: 85, mozjpeg: true })
+        .toBuffer();
+      const imageUrl = await uploadImageToCloudinary(normalizedImage, {
+        folder: "floate/products",
+        mimeType: "image/jpeg",
+      });
+      return res.status(201).json({ success: true, imageUrl });
+    } catch (error: any) {
+      if (error?.type === "entity.too.large") {
+        return res.status(413).json({ success: false, error: "Image must be 8 MB or smaller." });
+      }
+      console.error("[Catalog] Failed to upload product image:", error);
+      return res.status(503).json({ success: false, error: error.message || "Product image storage is unavailable." });
     }
   }
 );

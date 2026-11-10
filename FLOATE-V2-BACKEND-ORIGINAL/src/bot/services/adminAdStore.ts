@@ -1,8 +1,7 @@
-import { randomUUID } from "node:crypto";
 import { applicationDefault, cert, getApps, initializeApp, type ServiceAccount } from "firebase-admin/app";
 import { FieldValue, getFirestore } from "firebase-admin/firestore";
-import { getStorage } from "firebase-admin/storage";
 import firebaseConfig from "../../../firebase-applet-config.json";
+import { uploadImageToCloudinary } from "./cloudinaryService.js";
 
 type AdRecord = Record<string, unknown> & { id: string };
 
@@ -164,18 +163,5 @@ export async function recordAdEvent(id: string, event: "view" | "click"): Promis
 }
 
 export async function uploadAdImage(buffer: Buffer): Promise<string> {
-  const bucket = getStorage(getAdminApp()).bucket();
-  if (!bucket.name) throw new Error("Firebase Storage bucket is not configured.");
-
-  const fileName = `catalog/admin_ad_${randomUUID()}.jpg`;
-  const downloadToken = randomUUID();
-  await bucket.file(fileName).save(buffer, {
-    resumable: false,
-    metadata: {
-      contentType: "image/jpeg",
-      metadata: { firebaseStorageDownloadTokens: downloadToken },
-    },
-  });
-
-  return `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(fileName)}?alt=media&token=${downloadToken}`;
+  return uploadImageToCloudinary(buffer, { folder: "floate/admin-ads", mimeType: "image/jpeg" });
 }

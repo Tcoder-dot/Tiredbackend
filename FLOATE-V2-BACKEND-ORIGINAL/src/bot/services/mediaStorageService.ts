@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { uploadBufferToStorage } from './storageService.js';
+import { uploadBufferToCloudinary } from './storageService.js';
 import { registerSimulatedMedia } from './whatsappService.js';
 
 // In-memory media cache for fast lookups
@@ -20,8 +20,8 @@ try {
 
 /**
  * Saves an uploaded product catalog image cleanly to storage without bloating Firestore.
- * - Stores actual binary to disk and/or Firebase Cloud Storage.
- * - Returns a clean, lightweight URL path `/api/media/:mediaId` suitable for storing in Firestore (< 50 bytes).
+ * - Stores actual image bytes in Cloudinary and keeps a local copy for development fallback.
+ * - Returns a persistent Cloudinary URL, or a local `/api/media/:mediaId` URL outside production.
  */
 export async function saveCatalogMedia(
   buffer: Buffer,
@@ -48,7 +48,7 @@ export async function saveCatalogMedia(
     console.warn(`[MediaStorage] Could not write ${cleanId} to disk:`, err);
   }
 
-  const cloudUrl = await uploadBufferToStorage(buffer, `catalog/${cleanId}`, mimeType);
+  const cloudUrl = await uploadBufferToCloudinary(buffer, `catalog/${cleanId}`, mimeType);
   if (!cloudUrl && process.env.NODE_ENV === 'production') {
     mediaMemoryCache.delete(cleanId);
     try {
@@ -59,7 +59,7 @@ export async function saveCatalogMedia(
     throw new Error('Persistent product image storage is unavailable. Please retry the upload.');
   }
   const publicUrl = cloudUrl || `/api/media/${cleanId}`;
-  if (cloudUrl) console.log(`[MediaStorage] Synced ${cleanId} to Firebase Storage.`);
+  if (cloudUrl) console.log(`[MediaStorage] Synced ${cleanId} to Cloudinary.`);
   return {
     mediaId: cleanId,
     publicUrl,

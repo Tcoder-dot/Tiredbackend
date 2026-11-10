@@ -110,6 +110,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
       const imageInput = document.getElementById("banner-image");
       const imagePreview = document.getElementById("image-preview");
       const imageHelp = document.getElementById("image-help");
+      let previewObjectUrl = "";
 
       const setStatus = (node, text, isError = false) => {
         node.textContent = text;
@@ -220,6 +221,8 @@ export const adminAdsDashboardHtml = `<!doctype html>
       const resetForm = () => {
         editingId = "";
         currentImageUrl = "";
+        if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+        previewObjectUrl = "";
         form.reset();
         imagePreview.removeAttribute("src");
         imagePreview.hidden = true;
@@ -236,6 +239,8 @@ export const adminAdsDashboardHtml = `<!doctype html>
       const beginEdit = (campaign) => {
         editingId = campaign.id;
         currentImageUrl = campaign.designedBannerUrl || campaign.rawImageUrl || "";
+        if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+        previewObjectUrl = "";
         imageInput.value = "";
         imageInput.required = false;
         imagePreview.src = currentImageUrl;
@@ -278,8 +283,11 @@ export const adminAdsDashboardHtml = `<!doctype html>
       document.getElementById("cancel-edit").addEventListener("click", resetForm);
       imageInput.addEventListener("change", () => {
         const file = imageInput.files && imageInput.files[0];
+        if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+        previewObjectUrl = "";
         if (file) {
-          imagePreview.src = URL.createObjectURL(file);
+          previewObjectUrl = URL.createObjectURL(file);
+          imagePreview.src = previewObjectUrl;
           imagePreview.hidden = false;
         } else {
           imagePreview.src = currentImageUrl;
