@@ -20,6 +20,7 @@ import { normalizePhone } from './sheetsService.js';
 import { sendWhatsAppMessage } from './whatsappService.js';
 import { config } from '../config.js';
 import { getPublicSiteUrl, buildMerchantProfileUrl, buildCertificateDownloadUrl } from '../../config/siteUrls.js';
+import { getBoostRequest, saveBoostRequest } from './adminAdStore.js';
 
 export const LAUNCH_DEADLINE_ISO = '2026-11-20T23:59:59.999Z';
 
@@ -275,6 +276,47 @@ export class MonetizationService {
       },
     });
 
+    if (['PRODUCT_BOOST_SINGLE', 'PRODUCT_BOOST_BUNDLE_5', 'SPONSORED_SPOT', 'BRAND_SPOT'].includes(tier.id)) {
+      try {
+        await saveBoostRequest({
+          txRef,
+          merchantPhone: canonicalPhone,
+          merchantName: merchant?.businessName || customerName,
+          packageId: tier.id,
+          packageName: tier.name,
+          amount,
+          currency: 'NGN',
+          productId: params.productId || '',
+          productTitle: params.productTitle || '',
+          category: params.category || merchant?.category || '',
+          city: params.city || merchant?.city || '',
+          status: 'PAYMENT_PENDING',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        console.error('[Boost Admin Queue] Could not record checkout intent:', error);
+      }
+
+      const adminPhone = process.env.ADMIN_WHATSAPP_PHONE || config.adminWhatsAppPhone;
+      if (adminPhone) {
+        const intentMessage =
+          `📣 *NEW FLOATE PROMOTION REQUEST*\n\n` +
+          `🏬 Business: ${merchant?.businessName || customerName}\n` +
+          `📱 WhatsApp: +${canonicalPhone}\n` +
+          `📦 Promotion: ${tier.name}\n` +
+          (params.productTitle ? `🛍️ Product: ${params.productTitle}\n` : '') +
+          `🏷️ Category: ${params.category || merchant?.category || 'Not specified'}\n` +
+          `📍 Location: ${params.city || merchant?.city || 'Not specified'}\n` +
+          `💳 Amount: ₦${amount.toLocaleString()}\n` +
+          `🧾 Reference: ${txRef}\n\n` +
+          `Status: Awaiting payment confirmation.`;
+        await sendWhatsAppMessage(adminPhone, intentMessage).catch((error) => {
+          console.warn('[Boost Admin WhatsApp Alert] Could not send checkout notification:', error);
+        });
+      }
+    }
+
     return {
       success: true,
       checkoutUrl: paymentRes.paymentLink,
@@ -320,6 +362,54 @@ export class MonetizationService {
     const nowIso = now.toISOString();
 
     console.log(`[Monetization Fulfillment] 💰 Fulfilling ${packageId} for ${canonicalPhone} (₦${amountPaid.toLocaleString()})`);
+
+    if (['PRODUCT_BOOST_SINGLE', 'PRODUCT_BOOST_BUNDLE_5', 'SPONSORED_SPOT', 'BRAND_SPOT'].includes(packageId)) {
+      const tier = this.getTierById(packageId);
+      const existingRequest = await getBoostRequest(txRef).catch((error) => {
+        console.error('[Boost Admin Queue] Could not read existing checkout intent:', error);
+        return null;
+      });
+      try {
+        await saveBoostRequest({
+          ...(existingRequest || {}),
+          txRef,
+          merchantPhone: canonicalPhone,
+          merchantName: merchant?.businessName || existingRequest?.merchantName || 'Verified Merchant',
+          packageId,
+          packageName: tier?.name || String(existingRequest?.packageName || packageId),
+          amount: Number(existingRequest?.amount) || amountPaid,
+          amountPaid,
+          currency: 'NGN',
+          productId: meta?.productId || existingRequest?.productId || '',
+          productTitle: meta?.productTitle || existingRequest?.productTitle || '',
+          category: meta?.category || merchant?.category || existingRequest?.category || '',
+          city: meta?.city || merchant?.city || existingRequest?.city || '',
+          status: 'PAID',
+          paidAt: nowIso,
+          updatedAt: nowIso,
+        });
+      } catch (error) {
+        console.error('[Boost Admin Queue] Could not record confirmed payment:', error);
+      }
+
+      const adminPhone = process.env.ADMIN_WHATSAPP_PHONE || config.adminWhatsAppPhone;
+      if (adminPhone && existingRequest?.status !== 'PAID') {
+        const adminMessage =
+          `✅ *FLOATE PROMOTION PAYMENT CONFIRMED*\n\n` +
+          `🏬 Business: ${merchant?.businessName || 'Verified Merchant'}\n` +
+          `📱 WhatsApp: +${canonicalPhone}\n` +
+          `📦 Promotion: ${tier?.name || packageId}\n` +
+          (meta?.productTitle ? `🛍️ Product: ${meta.productTitle}\n` : '') +
+          `🏷️ Category: ${meta?.category || merchant?.category || 'Not specified'}\n` +
+          `📍 Location: ${meta?.city || merchant?.city || 'Not specified'}\n` +
+          `💰 Paid: ₦${amountPaid.toLocaleString()}\n` +
+          `🧾 Reference: ${txRef}\n\n` +
+          `Open the FLOATE Ads Admin dashboard to review promotion status and metrics.`;
+        await sendWhatsAppMessage(adminPhone, adminMessage).catch((error) => {
+          console.warn('[Boost Admin WhatsApp Alert] Could not send payment notification:', error);
+        });
+      }
+    }
 
     // 1. VERIFIED PLUS FULFILLMENT
     if (packageId === 'VERIFIED_PLUS') {

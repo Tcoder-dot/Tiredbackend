@@ -13,11 +13,12 @@ import { extractCategoryIntent, normalizeFloateCategory } from "./services/inten
 import { ANCHOR_BUSINESSES } from "./controllers/searchController";
 import { createMerchantSlug } from "./src/utils/merchantSlug";
 import { normalizeWhatsAppNumber } from "./src/utils/whatsapp";
-import { handleWhatsAppVerification, handleWhatsAppWebhook } from "./src/bot/services/whatsappService.js";
+import { getAppBaseUrl, handleWhatsAppVerification, handleWhatsAppWebhook, sendWhatsAppMessage } from "./src/bot/services/whatsappService.js";
 import { adminAdsDashboardHtml } from "./src/adminAdsDashboard.js";
 import {
   deleteAd,
   getAd,
+  listBoostRequests,
   listAds,
   migrateLegacyStorefrontAds,
   recordAdEvent,
@@ -29,6 +30,10 @@ import { corsMiddleware } from "./src/config/cors.js";
 import { isVoiceTranscriptionConfigured, isWhatsAppAuthConfigured } from "./src/bot/config.js";
 import { getCatalogMedia } from "./src/bot/services/mediaStorageService.js";
 import { uploadImageToCloudinary } from "./src/bot/services/cloudinaryService.js";
+import { sessionCookieMiddleware } from "./src/middleware/auth.js";
+import { whatsappAuthService } from "./src/bot/services/whatsappAuthService.js";
+import { renderCredentialPng, resolveCredential } from "./src/bot/services/credentialAssetRenderer.js";
+import { createCredentialForMerchant } from "./src/bot/services/credentialService.js";
 import { SEO_HUBS_DATA } from "./src/data/seoHubs";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch } from "firebase/firestore";
@@ -175,6 +180,164 @@ app.get("/api/admin/ads", requireAdminApiKey, async (_req, res) => {
   }
 });
 
+app.get("/api/admin/boost-requests", requireAdminApiKey, async (_req, res) => {
+  try {
+    const requests = await listBoostRequests();
+    return res.json({ success: true, requests, total: requests.length });
+  } catch (error: any) {
+    console.error("[Ads Admin] Failed to load boost requests:", error);
+    return res.status(503).json({
+      success: false,
+      error: error?.message || "Promotion request data is unavailable.",
+    });
+  }
+});
+
+app.get("/api/admin/marketplace-metrics", requireAdminApiKey, async (req, res) => {
+  try {
+    const [businessSnapshot, merchantSnapshot, searchSnapshot, leadSnapshot, orderSnapshot] = await Promise.all([
+      getDocs(collection(firestoreDb, "businesses")),
+      getDocs(collection(firestoreDb, "merchants")),
+      getDocs(collection(firestoreDb, "search_logs")),
+      getDocs(collection(firestoreDb, "leads")),
+      getDocs(collection(firestoreDb, "escrow_orders")),
+    ]);
+
+    const merchantsByKey = new Map<string, Record<string, any>>();
+    for (const snapshot of [businessSnapshot, merchantSnapshot]) {
+      snapshot.docs.forEach((merchantDoc) => {
+        const data = merchantDoc.data();
+        const phone = normalizeWhatsAppNumber(
+          data.whatsappNumber || data.whatsapp || data.whatsapp_number || data.phone
+        );
+        const key = phone || String(data.id || merchantDoc.id);
+        const existing = merchantsByKey.get(key);
+        merchantsByKey.set(key, { ...existing, ...data, id: data.id || merchantDoc.id, phone: phone || "" });
+      });
+    }
+
+    const merchants = [...merchantsByKey.values()];
+    const locations = [...new Set(merchants.flatMap((merchant) => [
+      String(merchant.city || "").trim(),
+      String(merchant.state || "").trim(),
+    ]).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const categories = [...new Set(merchants.map((merchant) =>
+      String(merchant.category || merchant.primaryCategory || "").trim()
+    ).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const selectedLocation = String(req.query.location || "").trim().toLowerCase();
+    const selectedCategory = String(req.query.category || "").trim().toLowerCase();
+    const matchesLocation = (merchant: Record<string, any>) => !selectedLocation || [
+      merchant.city, merchant.state, merchant.location, merchant.marketLocation
+    ].some((value) => String(value || "").toLowerCase().includes(selectedLocation));
+    const matchesCategory = (merchant: Record<string, any>) => !selectedCategory ||
+      String(merchant.category || merchant.primaryCategory || "").toLowerCase() === selectedCategory;
+    const filteredMerchants = merchants.filter((merchant) => matchesLocation(merchant) && matchesCategory(merchant));
+    const phoneToMerchant = new Map(merchants.filter((merchant) => merchant.phone).map((merchant) => [merchant.phone, merchant]));
+    const allowedPhones = new Set(filteredMerchants.map((merchant) => merchant.phone).filter(Boolean));
+    const allowedMerchantIds = new Set(filteredMerchants.map((merchant) => String(merchant.id || "")));
+    const leaderboard = new Map<string, {
+      name: string;
+      phone: string;
+      city: string;
+      state: string;
+      category: string;
+      connections: number;
+      searchAppearances: number;
+      completedOrders: number;
+    }>();
+    filteredMerchants.forEach((merchant) => {
+      const key = merchant.phone || String(merchant.id);
+      leaderboard.set(key, {
+        name: String(merchant.businessName || merchant.name || "Floate Merchant"),
+        phone: String(merchant.phone || ""),
+        city: String(merchant.city || ""),
+        state: String(merchant.state || ""),
+        category: String(merchant.category || merchant.primaryCategory || "General"),
+        connections: 0,
+        searchAppearances: 0,
+        completedOrders: 0,
+      });
+    });
+
+    let totalSearches = 0;
+    searchSnapshot.docs.forEach((searchDoc) => {
+      const search = searchDoc.data();
+      const matchedPhones = Array.isArray(search.matchedMerchantPhones)
+        ? search.matchedMerchantPhones.map(normalizeWhatsAppNumber).filter(Boolean)
+        : [];
+      const matchedInScope = matchedPhones.filter((phone) => allowedPhones.has(phone));
+      const searchLocationMatches = !selectedLocation ||
+        String(search.searchedLocation || "").toLowerCase().includes(selectedLocation);
+      const includeSearch = selectedCategory
+        ? matchedInScope.length > 0
+        : selectedLocation
+          ? matchedInScope.length > 0 || searchLocationMatches
+          : true;
+      if (!includeSearch) return;
+      totalSearches++;
+      matchedInScope.forEach((phone) => {
+        const stats = leaderboard.get(phone);
+        if (stats) stats.searchAppearances++;
+      });
+    });
+
+    let totalConnections = 0;
+    leadSnapshot.docs.forEach((leadDoc) => {
+      const lead = leadDoc.data();
+      const phone = normalizeWhatsAppNumber(lead.merchantWhatsapp || lead.vendorPhone);
+      const merchant = phone ? phoneToMerchant.get(phone) : undefined;
+      const merchantId = String(lead.merchantId || "");
+      const inScope = selectedCategory || selectedLocation
+        ? Boolean((phone && allowedPhones.has(phone)) || (merchantId && allowedMerchantIds.has(merchantId)))
+        : true;
+      if (!inScope) return;
+      totalConnections++;
+      const stats = leaderboard.get(phone || merchantId);
+      if (stats) stats.connections++;
+    });
+
+    orderSnapshot.docs.forEach((orderDoc) => {
+      const order = orderDoc.data();
+      if (!["FUNDS_RELEASED", "DELIVERY_CONFIRMED"].includes(String(order.status || "").toUpperCase())) return;
+      const phone = normalizeWhatsAppNumber(order.vendorPhone || order.merchantPhone);
+      const merchantId = String(order.vendorId || "");
+      const inScope = selectedCategory || selectedLocation
+        ? Boolean((phone && allowedPhones.has(phone)) || (merchantId && allowedMerchantIds.has(merchantId)))
+        : true;
+      if (!inScope) return;
+      const stats = leaderboard.get(phone || merchantId);
+      if (stats) stats.completedOrders++;
+    });
+
+    const rankedMerchants = [...leaderboard.values()]
+      .sort((a, b) =>
+        b.connections - a.connections ||
+        b.completedOrders - a.completedOrders ||
+        b.searchAppearances - a.searchAppearances
+      )
+      .slice(0, 20);
+
+    return res.json({
+      success: true,
+      generatedAt: new Date().toISOString(),
+      filters: { location: selectedLocation, category: selectedCategory },
+      options: { locations, categories },
+      totals: {
+        businesses: filteredMerchants.length,
+        searches: totalSearches,
+        connections: totalConnections,
+      },
+      leaderboard: rankedMerchants,
+    });
+  } catch (error: any) {
+    console.error("[Ads Admin] Failed to build marketplace metrics:", error);
+    return res.status(503).json({
+      success: false,
+      error: error?.message || "Marketplace metrics are unavailable.",
+    });
+  }
+});
+
 app.post(
   "/api/admin/ads/image",
   requireAdminApiKey,
@@ -258,6 +421,51 @@ app.post(
       }
       console.error("[Catalog] Failed to upload product image:", error);
       return res.status(503).json({ success: false, error: error.message || "Product image storage is unavailable." });
+    }
+  }
+);
+
+app.post(
+  "/api/catalog/business/profile-image",
+  express.raw({ type: () => true, limit: "8mb" }),
+  async (req, res) => {
+    const expectedKey = Buffer.from(process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4d5e6");
+    const providedKey = Buffer.from(req.get("x-api-key") || "");
+    if (providedKey.length !== expectedKey.length || !timingSafeEqual(providedKey, expectedKey)) {
+      return res.status(401).json({ success: false, error: "API authentication required." });
+    }
+
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ success: false, error: "Select a business profile image to upload." });
+    }
+
+    const mimeType = String(req.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const signatures: Record<string, (buffer: Buffer) => boolean> = {
+      "image/jpeg": (buffer) => buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff,
+      "image/png": (buffer) => buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+      "image/webp": (buffer) => buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP",
+    };
+    if (!signatures[mimeType] || !signatures[mimeType](req.body)) {
+      return res.status(400).json({ success: false, error: "Upload a valid JPG, PNG, or WebP image." });
+    }
+
+    try {
+      const normalizedImage = await sharp(req.body)
+        .rotate()
+        .resize(1000, 1000, { fit: "inside", withoutEnlargement: true })
+        .webp({ quality: 85, effort: 4 })
+        .toBuffer();
+      const imageUrl = await uploadImageToCloudinary(normalizedImage, {
+        folder: "floate/business-profiles",
+        mimeType: "image/webp",
+      });
+      return res.status(201).json({ success: true, imageUrl });
+    } catch (error: any) {
+      if (error?.type === "entity.too.large") {
+        return res.status(413).json({ success: false, error: "Image must be 8 MB or smaller." });
+      }
+      console.error("[Catalog] Failed to upload business profile image:", error);
+      return res.status(503).json({ success: false, error: error.message || "Business image storage is unavailable." });
     }
   }
 );
@@ -442,6 +650,57 @@ app.post("/api/buyer/inquire", async (req, res) => {
   return res.json({ success: true, message: "Inquiry recorded" });
 });
 
+const deliverRegistrationCertificate = async (input: {
+  businessName: string;
+  ownerName: string;
+  phone: string;
+  city: string;
+  state: string;
+  certificateId?: string;
+}): Promise<boolean> => {
+  try {
+    const locationParts = [input.city, input.state].filter(Boolean);
+    if (!locationParts.some((part) => part.toLowerCase() === "nigeria")) locationParts.push("Nigeria");
+    const credential = createCredentialForMerchant({
+      merchantId: `vendor_${input.phone}`,
+      name: input.ownerName || input.businessName,
+      biz: input.businessName || "Floate Merchant",
+      loc: locationParts.join(", "),
+      phone: input.phone,
+      customFid: input.certificateId,
+    });
+    const certificate = await renderCredentialPng(credential, "certificate");
+    let imageUrl = "";
+    try {
+      imageUrl = await uploadImageToCloudinary(certificate.buffer, {
+        folder: "floate/business-certificates",
+        publicId: credential.fid,
+        mimeType: "image/png",
+      });
+    } catch (error) {
+      console.warn("[Registration] Certificate image upload failed; using the public certificate endpoint:", error);
+    }
+
+    const certificateUrl = imageUrl ||
+      `${getAppBaseUrl()}/api/credentials/${encodeURIComponent(input.phone)}/download/certificate`;
+    const sent = await sendWhatsAppMessage(
+      input.phone,
+      `Congratulations, ${input.businessName || "your business"} is now registered with Floate. Your business certificate is attached. Keep it as proof of your Floate registration.`,
+      {
+        image: {
+          url: certificateUrl,
+          caption: `Congratulations, ${input.businessName || "your business"} is registered with Floate. Your certificate is attached. Certificate ID: ${credential.fid}`,
+        },
+      }
+    );
+    if (!sent) console.error(`[Registration] WhatsApp certificate delivery failed for +${input.phone}.`);
+    return sent;
+  } catch (error) {
+    console.error(`[Registration] Could not deliver certificate to +${input.phone}:`, error);
+    return false;
+  }
+};
+
 // Registration Endpoint: POST /api/register/business
 app.post("/api/register/business", async (req, res) => {
   const { 
@@ -457,6 +716,7 @@ app.post("/api/register/business", async (req, res) => {
     storeType,
     description,
     bio,
+    profileImageUrl,
     selfieUrl,
     profilePhoto,
     coordinates,
@@ -464,7 +724,7 @@ app.post("/api/register/business", async (req, res) => {
   } = req.body;
   const cleanDigits = String(phone || "").replace(/[^0-9]/g, "");
   const intlPhone = cleanDigits.startsWith("0") ? "234" + cleanDigits.slice(1) : (cleanDigits.startsWith("234") ? cleanDigits : "234" + cleanDigits);
-  const photo = selfieUrl || profilePhoto || "";
+  const photo = profileImageUrl || selfieUrl || profilePhoto || "";
 
   if (REMOTE_BACKEND) {
     try {
@@ -482,6 +742,16 @@ app.post("/api/register/business", async (req, res) => {
         return res.status(remoteRes.ok ? 502 : remoteRes.status).json(
           remoteData || { success: false, error: "Backend returned an invalid registration response." }
         );
+      }
+      if (remoteData.certificateSent !== true) {
+        const certificateSent = await deliverRegistrationCertificate({
+          businessName: String(businessName || "Floate Merchant"),
+          ownerName: String(ownerName || businessName || ""),
+          phone: intlPhone,
+          city: String(city || ""),
+          state: String(state || ""),
+        });
+        remoteData.certificateSent = certificateSent;
       }
       return res.status(remoteRes.status).json(remoteData);
     } catch (e) {
@@ -561,6 +831,15 @@ app.post("/api/register/business", async (req, res) => {
       }, { merge: true });
     }
 
+    const credentialLocation = [city || marketHub, state].filter(Boolean);
+    if (!credentialLocation.some((part) => String(part).toLowerCase() === "nigeria")) credentialLocation.push("Nigeria");
+    const credential = createCredentialForMerchant({
+      merchantId: docId,
+      name: ownerName || businessName || "Floate Merchant",
+      biz: businessName || "Market Merchant",
+      loc: credentialLocation.join(", ") || "Nigeria",
+      phone: intlPhone,
+    });
     const businessData = {
       id: docId,
       slug: intlPhone,
@@ -583,6 +862,7 @@ app.post("/api/register/business", async (req, res) => {
       avatarUrl: photo,
       avatar_url: photo,
       imageUrl: photo,
+      certificateId: credential.fid,
       selfieUrl: photo,
       description: resolvedDescription,
       bio: resolvedDescription,
@@ -598,10 +878,19 @@ app.post("/api/register/business", async (req, res) => {
     await setDoc(doc(firestoreDb, "businesses", docId), businessData, { merge: true });
 
     console.log(`[Floate OS] Automatically Verified New Merchant: ${businessName} (${intlPhone}) in ${marketHub || city}.`);
+    const certificateSent = await deliverRegistrationCertificate({
+      businessName: String(businessName || "Market Merchant"),
+      ownerName: String(ownerName || businessName || ""),
+      phone: intlPhone,
+      city: String(city || marketHub || ""),
+      state: String(state || ""),
+      certificateId: credential.fid,
+    });
 
     return res.json({
       success: true,
       message: "Business successfully registered and 100% verified automatically!",
+      certificateSent,
       phone: intlPhone,
       verified: true,
       isVerified: true,
@@ -666,39 +955,24 @@ app.get("/api/credentials/lookup/:slug", async (req, res) => {
 
 // Certificate Download Endpoint
 app.get("/api/credentials/:slug/download/certificate", async (req, res) => {
-  const { slug } = req.params;
-  const certificateHtml = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Floate Official Certificate - ${slug}</title>
-  <style>
-    body { margin: 0; background: #0A290E; font-family: monospace; display: flex; align-items: center; justify-content: center; height: 100vh; color: #FFF; }
-    .cert { width: 800px; height: 600px; border: 8px solid #FFC107; background: linear-gradient(135deg, #123F16 0%, #0A290E 100%); padding: 40px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; text-align: center; }
-    h1 { color: #FFC107; font-size: 28px; margin: 0; }
-    h2 { font-size: 32px; margin: 10px 0; color: #FFF; }
-    p { font-size: 16px; color: #DDD; }
-    .badge { background: #FFC107; color: #123F16; padding: 10px 20px; font-weight: bold; border-radius: 30px; display: inline-block; margin-top: 20px; }
-  </style>
-</head>
-<body>
-  <div class="cert">
-    <div>
-      <p style="letter-spacing: 4px; color: #FFC107;">FLOATE AFRICA LTD</p>
-      <h1>OFFICIAL CERTIFICATE OF VERIFICATION</h1>
-    </div>
-    <div>
-      <p>This is to certify that merchant stall</p>
-      <h2>${slug.toUpperCase()}</h2>
-      <p>is 100% Verified & Active on Floate Operating System</p>
-      <div class="badge">100% VERIFIED MERCHANT</div>
-    </div>
-    <p style="font-size: 12px; color: #aaa;">Securely verified via Floate Shared Enterprise Network</p>
-  </div>
-</body>
-</html>`;
-  res.setHeader("Content-Type", "text/html");
-  return res.send(certificateHtml);
+  const identifier = String(req.params.slug || "").trim();
+  if (!identifier) return res.status(400).json({ success: false, error: "Merchant identifier is required." });
+
+  try {
+    const credential = await resolveCredential(identifier);
+    if (!credential) return res.status(404).json({ success: false, error: "Merchant certificate could not be found." });
+
+    const asset = await renderCredentialPng(credential, "certificate");
+    const filename = asset.filename.replace(/[^A-Za-z0-9._-]/g, "_");
+    res.setHeader("Content-Type", asset.contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Length", asset.buffer.length);
+    res.setHeader("Cache-Control", "private, no-store");
+    return res.status(200).send(asset.buffer);
+  } catch (error) {
+    console.error("[Credentials] Failed to generate certificate download:", error);
+    return res.status(500).json({ success: false, error: "Certificate could not be generated. Please try again." });
+  }
 });
 
 // Catalog Product Add Endpoint: POST /api/catalog/product
@@ -1117,6 +1391,63 @@ app.get("/api/catalog/vendor/:phone", async (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
+
+app.patch(
+  "/api/catalog/vendor/:phone/profile-image",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to update this image." });
+    }
+
+    const requestedPhone = normalizeWhatsAppNumber(req.params.phone);
+    const authenticatedPhones = [req.user.phone, req.user.id, req.user.vendorId]
+      .map((value) => normalizeWhatsAppNumber(value))
+      .filter(Boolean);
+    if (!requestedPhone || !authenticatedPhones.includes(requestedPhone)) {
+      return res.status(403).json({ success: false, error: "You can only update the profile image for your own business." });
+    }
+
+    const imageUrl = typeof req.body?.imageUrl === "string" ? req.body.imageUrl.trim() : "";
+    try {
+      if (!imageUrl || imageUrl.length > 2048) {
+        return res.status(400).json({ success: false, error: "A valid stored business image URL is required." });
+      }
+      const parsedImageUrl = new URL(imageUrl);
+      if (parsedImageUrl.protocol !== "https:" || parsedImageUrl.hostname !== "res.cloudinary.com") {
+        return res.status(400).json({ success: false, error: "A valid stored business image URL is required." });
+      }
+
+      const businesses = await getDocs(collection(firestoreDb, "businesses"));
+      const merchantDoc = businesses.docs.find((businessDoc) => {
+        const business = businessDoc.data();
+        return normalizeWhatsAppNumber(
+          business.whatsappNumber || business.whatsapp || business.phone || business.whatsapp_number
+        ) === requestedPhone;
+      });
+      if (!merchantDoc) {
+        return res.status(404).json({ success: false, error: "Merchant not found." });
+      }
+
+      await setDoc(doc(firestoreDb, "businesses", merchantDoc.id), {
+        avatarUrl: imageUrl,
+        avatar_url: imageUrl,
+        imageUrl,
+        profilePhotoUrl: imageUrl,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+
+      return res.json({ success: true, imageUrl });
+    } catch (error: any) {
+      if (error instanceof TypeError) {
+        return res.status(400).json({ success: false, error: "A valid stored business image URL is required." });
+      }
+      console.error("[Catalog] Failed to save business profile image:", error);
+      return res.status(500).json({ success: false, error: "Business profile image could not be saved." });
+    }
+  }
+);
 
 // Merchant Credentials Endpoint: /api/v1/credentials/:fid (and /api/credentials/:fid)
 app.get(["/api/v1/credentials/:fid", "/api/credentials/:fid"], async (req, res) => {

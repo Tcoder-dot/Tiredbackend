@@ -37,12 +37,31 @@ export const adminAdsDashboardHtml = `<!doctype html>
     .campaign img { width: 130px; aspect-ratio: 3 / 1; object-fit: cover; background: #edf2ed; border-radius: 8px; }
     .image-preview { width: 300px; aspect-ratio: 3 / 1; object-fit: cover; border: 1px solid #dfe7df; border-radius: 8px; background: #edf2ed; }
     .campaign h3 { margin: 0; font-size: 15px; }
+    .campaign-title { border: 0; padding: 0; background: transparent; color: #17211b; font-size: 15px; text-align: left; }
+    .campaign-title:hover { text-decoration: underline; }
     .campaign p { margin: 6px 0; color: #607066; font-size: 13px; }
+    .campaign-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+    .metric { padding: 12px; border-radius: 9px; background: #f5f8f4; }
+    .metric strong { display: block; font-size: 20px; color: #14531b; }
+    .metric span { color: #607066; font-size: 12px; }
+    .data-row { padding: 12px 0; border-top: 1px solid #e6ece6; display: flex; justify-content: space-between; gap: 16px; }
+    .data-row h3 { margin: 0; font-size: 14px; }
+    .data-row p { margin: 5px 0 0; color: #607066; font-size: 12px; }
+    .toolbar { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+    .toolbar label { min-width: 180px; }
+    .stat-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+    .stat-card { background: #f5f8f4; border-radius: 10px; padding: 16px; }
+    .stat-card strong { display: block; font-size: 26px; color: #14531b; }
+    .stat-card span { font-size: 12px; color: #607066; }
+    .table-wrap { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { padding: 10px 8px; text-align: left; border-top: 1px solid #e6ece6; white-space: nowrap; }
+    th { color: #607066; font-size: 11px; text-transform: uppercase; }
     .badge { display: inline-block; font-size: 11px; font-weight: 800; border-radius: 99px; padding: 3px 8px; background: #e7f5e9; color: #17662a; }
     .badge.PAUSED, .badge.DRAFT, .badge.PENDING_DESIGN { background: #fff3d6; color: #855b00; }
     .badge.EXPIRED { background: #f0f0f0; color: #555; }
     [hidden] { display: none !important; }
-    @media (max-width: 620px) { .grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } .campaign { grid-template-columns: 88px 1fr; gap: 10px; } .campaign img { width: 88px; } .image-preview { width: min(100%, 300px); } }
+    @media (max-width: 620px) { .grid, .stat-grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } .campaign { grid-template-columns: 88px 1fr; gap: 10px; } .campaign img { width: 88px; } .image-preview { width: min(100%, 300px); } }
   </style>
 </head>
 <body>
@@ -90,6 +109,24 @@ export const adminAdsDashboardHtml = `<!doctype html>
         <div class="campaigns-head"><div><h2>Campaigns</h2><p id="campaign-count" class="muted"></p></div><button id="refresh" class="secondary" type="button">Refresh</button></div>
         <div id="campaign-list" class="muted">Loading campaigns…</div>
       </section>
+      <section class="panel campaigns">
+        <div class="campaigns-head"><div><h2>Merchant promotion requests</h2><p class="muted">Checkout requests and confirmed payments for product boosts and business ads.</p></div></div>
+        <div class="toolbar">
+          <label>Payment status<select id="boost-status-filter"><option value="ALL">All requests</option><option value="PAID">Paid</option><option value="PAYMENT_PENDING">Awaiting payment</option></select></label>
+        </div>
+        <div id="boost-request-list" class="muted">Loading promotion requests…</div>
+      </section>
+      <section class="panel campaigns">
+        <div class="campaigns-head"><div><h2>Marketplace performance</h2><p class="muted">Live counts from registered merchants, buyer searches, and WhatsApp inquiry connections.</p></div><button id="refresh-metrics" class="secondary" type="button">Refresh metrics</button></div>
+        <div class="toolbar">
+          <label>Location<select id="metrics-location"><option value="">All locations</option></select></label>
+          <label>Category<select id="metrics-category"><option value="">All categories</option></select></label>
+        </div>
+        <p id="metrics-status" class="status" role="status"></p>
+        <div id="metrics-totals" class="stat-grid"></div>
+        <div class="campaigns-head"><h2>Merchant leaderboard</h2><p id="metrics-updated" class="muted"></p></div>
+        <div id="merchant-leaderboard" class="table-wrap muted">Loading marketplace metrics…</div>
+      </section>
     </section>
   </main>
   <script>
@@ -102,11 +139,19 @@ export const adminAdsDashboardHtml = `<!doctype html>
       const formStatus = document.getElementById("form-status");
       const form = document.getElementById("campaign-form");
       const list = document.getElementById("campaign-list");
+      const boostList = document.getElementById("boost-request-list");
+      const metricsTotals = document.getElementById("metrics-totals");
+      const leaderboard = document.getElementById("merchant-leaderboard");
+      const locationFilter = document.getElementById("metrics-location");
+      const categoryFilter = document.getElementById("metrics-category");
+      const boostStatusFilter = document.getElementById("boost-status-filter");
       const fields = ["merchantName", "headline", "description", "ctaText", "adType", "targetUrl", "targetCities", "targetCategories", "keywords", "status"];
       let adminKey = sessionStorage.getItem(keySlot) || "";
       let editingId = "";
       let currentImageUrl = "";
       let campaigns = [];
+      let boostRequests = [];
+      let pollingTimer = null;
       const imageInput = document.getElementById("banner-image");
       const imagePreview = document.getElementById("image-preview");
       const imageHelp = document.getElementById("image-help");
@@ -122,6 +167,8 @@ export const adminAdsDashboardHtml = `<!doctype html>
         document.getElementById("logout").hidden = !value;
       };
       const splitList = (value) => Array.isArray(value) ? value.join(", ") : (value || "");
+      const formatNumber = (value) => Number(value || 0).toLocaleString();
+      const formatMoney = (value) => "₦" + Number(value || 0).toLocaleString();
       const request = async (path = api, options = {}) => {
         const response = await fetch(path, {
           ...options,
@@ -150,6 +197,8 @@ export const adminAdsDashboardHtml = `<!doctype html>
       const lock = () => {
         adminKey = "";
         sessionStorage.removeItem(keySlot);
+        if (pollingTimer) clearInterval(pollingTimer);
+        pollingTimer = null;
         setAuthed(false);
       };
       const renderCampaigns = () => {
@@ -170,8 +219,11 @@ export const adminAdsDashboardHtml = `<!doctype html>
           image.onerror = () => { image.hidden = true; };
           row.append(image);
           const content = document.createElement("div");
-          const heading = document.createElement("h3");
+          const heading = document.createElement("button");
+          heading.type = "button";
+          heading.className = "campaign-title";
           heading.textContent = campaign.headline || "Sponsored placement";
+          heading.setAttribute("aria-expanded", "false");
           const badge = document.createElement("span");
           badge.className = "badge " + campaign.status;
           badge.textContent = campaign.status;
@@ -181,6 +233,30 @@ export const adminAdsDashboardHtml = `<!doctype html>
           description.textContent = campaign.description || "";
           const stats = document.createElement("p");
           stats.textContent = "Views: " + Number(campaign.impressions || 0) + " · Clicks: " + Number(campaign.clicks || 0);
+          const metrics = document.createElement("div");
+          metrics.className = "campaign-metrics";
+          metrics.hidden = true;
+          const views = Number(campaign.impressions || 0);
+          const clicks = Number(campaign.clicks || 0);
+          const clickRate = views ? ((clicks / views) * 100).toFixed(2) + "%" : "0%";
+          const addMetric = (label, value) => {
+            const metric = document.createElement("div");
+            metric.className = "metric";
+            const number = document.createElement("strong");
+            number.textContent = value;
+            const caption = document.createElement("span");
+            caption.textContent = label;
+            metric.append(number, caption);
+            metrics.append(metric);
+          };
+          addMetric("Impressions", formatNumber(views));
+          addMetric("Clicks", formatNumber(clicks));
+          addMetric("Click-through rate", clickRate);
+          addMetric("Budget / paid value", formatMoney(campaign.budget || campaign.amountPaid || 0));
+          heading.addEventListener("click", () => {
+            metrics.hidden = !metrics.hidden;
+            heading.setAttribute("aria-expanded", String(!metrics.hidden));
+          });
           const actions = document.createElement("div");
           actions.className = "actions";
           const edit = document.createElement("button");
@@ -194,7 +270,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
           remove.textContent = "Delete";
           remove.addEventListener("click", () => deleteCampaign(campaign));
           actions.append(edit, remove);
-          content.append(heading, badge, merchant, description, stats, actions);
+          content.append(heading, badge, merchant, description, stats, metrics, actions);
           row.append(content);
           list.append(row);
         }
@@ -210,13 +286,149 @@ export const adminAdsDashboardHtml = `<!doctype html>
           list.textContent = error.message || "Unable to load campaigns.";
         }
       };
+      const renderBoostRequests = () => {
+        boostList.replaceChildren();
+        const status = boostStatusFilter.value;
+        const visible = boostRequests.filter((request) => status === "ALL" || request.status === status);
+        if (!visible.length) {
+          boostList.textContent = "No promotion requests match this filter.";
+          return;
+        }
+        for (const request of visible) {
+          const row = document.createElement("article");
+          row.className = "data-row";
+          const details = document.createElement("div");
+          const heading = document.createElement("h3");
+          heading.textContent = request.merchantName || "Floate Merchant";
+          const info = document.createElement("p");
+          info.textContent = [
+            request.packageName || request.packageId || "Promotion",
+            request.productTitle || "",
+            request.category || "",
+            request.city || ""
+          ].filter(Boolean).join(" · ");
+          const phone = document.createElement("p");
+          phone.textContent = "WhatsApp: +" + (request.merchantPhone || "Not recorded") + " · Ref: " + (request.txRef || request.id || "");
+          const timestamp = document.createElement("p");
+          timestamp.textContent = request.status === "PAID"
+            ? "Paid " + new Date(request.paidAt || request.updatedAt || request.createdAt).toLocaleString()
+            : "Checkout started " + new Date(request.createdAt || request.updatedAt).toLocaleString();
+          details.append(heading, info, phone, timestamp);
+          const summary = document.createElement("div");
+          const badge = document.createElement("span");
+          badge.className = "badge " + (request.status === "PAID" ? "ACTIVE" : "PAUSED");
+          badge.textContent = request.status === "PAID" ? "PAID" : "AWAITING PAYMENT";
+          const amount = document.createElement("p");
+          amount.textContent = formatMoney(request.amountPaid || request.amount || 0);
+          summary.append(badge, amount);
+          row.append(details, summary);
+          boostList.append(row);
+        }
+      };
+      const loadBoostRequests = async () => {
+        boostList.textContent = "Loading promotion requests…";
+        try {
+          const result = await request("/api/admin/boost-requests");
+          boostRequests = result.requests || [];
+          renderBoostRequests();
+        } catch (error) {
+          boostList.textContent = error.message || "Unable to load promotion requests.";
+        }
+      };
+      const setSelectOptions = (select, values, placeholder) => {
+        const selected = select.value;
+        select.replaceChildren();
+        const any = document.createElement("option");
+        any.value = "";
+        any.textContent = placeholder;
+        select.append(any);
+        for (const value of values || []) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = value;
+          select.append(option);
+        }
+        select.value = [...select.options].some((option) => option.value === selected) ? selected : "";
+      };
+      const loadMetrics = async () => {
+        const query = new URLSearchParams();
+        if (locationFilter.value) query.set("location", locationFilter.value);
+        if (categoryFilter.value) query.set("category", categoryFilter.value);
+        const queryString = query.toString();
+        const suffix = queryString ? "?" + queryString : "";
+        document.getElementById("metrics-status").textContent = "Refreshing live marketplace metrics…";
+        try {
+          const result = await request("/api/admin/marketplace-metrics" + suffix);
+          setSelectOptions(locationFilter, result.options.locations, "All locations");
+          setSelectOptions(categoryFilter, result.options.categories, "All categories");
+          metricsTotals.replaceChildren();
+          [
+            ["Businesses", result.totals.businesses],
+            ["Buyer searches", result.totals.searches],
+            ["Buyer–merchant connections", result.totals.connections]
+          ].forEach(([label, value]) => {
+            const card = document.createElement("div");
+            card.className = "stat-card";
+            const count = document.createElement("strong");
+            count.textContent = formatNumber(value);
+            const caption = document.createElement("span");
+            caption.textContent = label;
+            card.append(count, caption);
+            metricsTotals.append(card);
+          });
+          leaderboard.replaceChildren();
+          if (!result.leaderboard.length) {
+            leaderboard.textContent = "No merchant activity for this location and category yet.";
+          } else {
+            const table = document.createElement("table");
+            const thead = document.createElement("thead");
+            const header = document.createElement("tr");
+            ["Business", "Location", "Category", "Connections", "Search appearances", "Completed orders"].forEach((label) => {
+              const cell = document.createElement("th");
+              cell.textContent = label;
+              header.append(cell);
+            });
+            thead.append(header);
+            const tbody = document.createElement("tbody");
+            result.leaderboard.forEach((merchant) => {
+              const row = document.createElement("tr");
+              [
+                merchant.name,
+                [merchant.city, merchant.state].filter(Boolean).join(", "),
+                merchant.category,
+                formatNumber(merchant.connections),
+                formatNumber(merchant.searchAppearances),
+                formatNumber(merchant.completedOrders)
+              ].forEach((value) => {
+                const cell = document.createElement("td");
+                cell.textContent = String(value || "—");
+                row.append(cell);
+              });
+              tbody.append(row);
+            });
+            table.append(thead, tbody);
+            leaderboard.append(table);
+          }
+          document.getElementById("metrics-updated").textContent = "Updated " + new Date(result.generatedAt).toLocaleTimeString();
+          document.getElementById("metrics-status").textContent = "";
+        } catch (error) {
+          document.getElementById("metrics-status").textContent = error.message || "Unable to load marketplace metrics.";
+          leaderboard.textContent = error.message || "Unable to load marketplace metrics.";
+        }
+      };
+      const loadDashboardData = async () => {
+        await Promise.all([loadCampaigns(), loadBoostRequests(), loadMetrics()]);
+        if (!pollingTimer && adminKey) pollingTimer = setInterval(() => {
+          if (!dashboard.hidden) void Promise.all([loadCampaigns(), loadBoostRequests(), loadMetrics()]);
+        }, 60000);
+      };
       const verifyKey = async (key) => {
         adminKey = key;
         await request();
         sessionStorage.setItem(keySlot, key);
         setAuthed(true);
         setStatus(loginStatus, "");
-        await loadCampaigns();
+        await loadDashboardData();
       };
       const resetForm = () => {
         editingId = "";
@@ -279,7 +491,11 @@ export const adminAdsDashboardHtml = `<!doctype html>
         }
       });
       document.getElementById("logout").addEventListener("click", lock);
-      document.getElementById("refresh").addEventListener("click", loadCampaigns);
+      document.getElementById("refresh").addEventListener("click", loadDashboardData);
+      document.getElementById("refresh-metrics").addEventListener("click", loadMetrics);
+      locationFilter.addEventListener("change", loadMetrics);
+      categoryFilter.addEventListener("change", loadMetrics);
+      boostStatusFilter.addEventListener("change", renderBoostRequests);
       document.getElementById("cancel-edit").addEventListener("click", resetForm);
       imageInput.addEventListener("change", () => {
         const file = imageInput.files && imageInput.files[0];

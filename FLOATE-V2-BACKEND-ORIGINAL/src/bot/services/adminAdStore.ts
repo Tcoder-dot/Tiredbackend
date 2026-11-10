@@ -112,6 +112,10 @@ function adsCollection() {
   return getFirestore(getAdminApp(), firebaseConfig.firestoreDatabaseId).collection("ads");
 }
 
+function boostRequestsCollection() {
+  return getFirestore(getAdminApp(), firebaseConfig.firestoreDatabaseId).collection("boost_requests");
+}
+
 export async function migrateLegacyStorefrontAds(): Promise<void> {
   const db = getFirestore(getAdminApp(), firebaseConfig.firestoreDatabaseId);
   const marker = db.collection("system_migrations").doc("legacy_storefront_ads_v1");
@@ -160,6 +164,22 @@ export async function recordAdEvent(id: string, event: "view" | "click"): Promis
     [event === "view" ? "impressions" : "clicks"]: FieldValue.increment(1),
   });
   return true;
+}
+
+export async function saveBoostRequest(request: Record<string, unknown> & { txRef: string }): Promise<void> {
+  await boostRequestsCollection().doc(request.txRef).set(request, { merge: true });
+}
+
+export async function getBoostRequest(txRef: string): Promise<Record<string, unknown> | null> {
+  const snapshot = await boostRequestsCollection().doc(txRef).get();
+  return snapshot.exists ? { ...snapshot.data(), id: snapshot.id } : null;
+}
+
+export async function listBoostRequests(): Promise<Record<string, unknown>[]> {
+  const snapshot = await boostRequestsCollection().get();
+  return snapshot.docs
+    .map((document) => ({ ...document.data(), id: document.id }))
+    .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
 }
 
 export async function uploadAdImage(buffer: Buffer): Promise<string> {

@@ -36,7 +36,7 @@ export async function resolveCredential(fidOrPhone: string): Promise<FloateCrede
         loc: `${directMerchant.city || directMerchant.state || 'Market Hub'}, Nigeria`,
         phone: directMerchant.whatsapp,
         isPlus: Boolean(directMerchant.isVerifiedPlus),
-        customFid: cleanId.startsWith('FLT-') ? cleanId : undefined,
+        customFid: cleanId.startsWith('FLT-') ? cleanId : directMerchant.certificateId,
       });
     }
   } catch (e) {
@@ -67,7 +67,7 @@ export async function resolveCredential(fidOrPhone: string): Promise<FloateCrede
         loc: `${merchant.city || merchant.state || 'Market Hub'}, Nigeria`,
         phone: merchant.whatsapp,
         isPlus: Boolean(merchant.isVerifiedPlus),
-        customFid: cleanId.startsWith('FLT-') ? cleanId : undefined,
+        customFid: cleanId.startsWith('FLT-') ? cleanId : merchant.certificateId,
       });
     }
   } catch (err) {
