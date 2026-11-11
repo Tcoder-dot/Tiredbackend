@@ -838,6 +838,7 @@ const findRegistrationConflict = async (businessName: string, phone: string) => 
   const requestedName = normalizeRegistrationName(businessName);
   let nameExists = false;
   let phoneExists = false;
+  let sameBusinessAndPhone = false;
 
   for (const snapshot of [businesses, merchants]) {
     for (const merchantDoc of snapshot.docs) {
@@ -852,13 +853,37 @@ const findRegistrationConflict = async (businessName: string, phone: string) => 
 
       if (existingName && existingName === requestedName) nameExists = true;
       if (existingPhones.includes(phone)) phoneExists = true;
-      if (nameExists && phoneExists) break;
+      if (existingName && existingName === requestedName && existingPhones.includes(phone)) {
+        sameBusinessAndPhone = true;
+      }
     }
-    if (nameExists && phoneExists) break;
   }
 
-  return { nameExists, phoneExists };
+  return { nameExists, phoneExists, sameBusinessAndPhone };
 };
+
+app.post("/api/register/business/check", async (req, res) => {
+  const businessName = String(req.body?.businessName || "").trim();
+  const phone = normalizeWhatsAppNumber(req.body?.phone);
+  if (!businessName || !phone) {
+    return res.status(400).json({ success: false, error: "Enter a business name and valid WhatsApp number to check." });
+  }
+
+  try {
+    const conflict = await findRegistrationConflict(businessName, phone);
+    return res.json({
+      success: true,
+      duplicate: conflict.sameBusinessAndPhone,
+      code: conflict.sameBusinessAndPhone ? "BUSINESS_AND_PHONE_EXISTS" : undefined,
+      message: conflict.sameBusinessAndPhone
+        ? "A business with this name and WhatsApp number already exists."
+        : "This business name and WhatsApp number are available.",
+    });
+  } catch (error) {
+    console.error("[Registration] Could not check business name and WhatsApp number:", error);
+    return res.status(503).json({ success: false, error: "Could not check these registration details right now. Please try again." });
+  }
+});
 
 // Registration Endpoint: POST /api/register/business
 app.post("/api/register/business", async (req, res) => {
