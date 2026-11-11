@@ -178,11 +178,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             <span>Back to Marketplace</span>
           </button>
 
-          <div className="flex items-center gap-2">
-            <span className="px-3 py-1 rounded-full bg-[#E6F4EA] text-[#0A4D3C] text-[11px] font-black uppercase tracking-wider border border-[#0A4D3C]/20">
-              🔒 Secure WhatsApp Auth
-            </span>
-          </div>
         </div>
       </header>
 
