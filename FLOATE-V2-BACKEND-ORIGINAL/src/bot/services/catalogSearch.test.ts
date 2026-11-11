@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { matchCatalogProducts } from './catalogSearch.ts';
+import { isBroadCategoryProductQuery, matchCatalogProducts } from './catalogSearch.ts';
 
 const catalog = [
   {
@@ -107,6 +107,22 @@ const catalog = [
     listingType: 'Product',
     city: 'Lagos',
   },
+  {
+    id: 'black-heel-shoe',
+    product: 'Black Heel Shoe',
+    price: '₦45,000',
+    category: 'Footwear',
+    listingType: 'Product',
+    city: 'Enugu',
+  },
+  {
+    id: 'white-heel-shoe',
+    product: 'White Heel Shoe',
+    price: '₦45,000',
+    category: 'Footwear',
+    listingType: 'Product',
+    city: 'Enugu',
+  },
 ];
 
 test('matches query keywords and enforces a stated budget', () => {
@@ -119,6 +135,12 @@ test('matches query keywords and enforces a stated budget', () => {
   );
 
   assert.deepEqual(results.map((product) => product.id), ['s24-under-budget']);
+});
+
+test('broad product categories are routed to merchant search instead of product suggestions', () => {
+  assert.equal(isBroadCategoryProductQuery('footwear'), true);
+  assert.equal(isBroadCategoryProductQuery('shoes and slippers'), true);
+  assert.equal(isBroadCategoryProductQuery('Nike Air Jordan shoes'), false);
 });
 
 test('matches related product vocabulary without losing specific item constraints', () => {
@@ -180,6 +202,26 @@ test('normalizes conversational product names such as T-shirts and make-up kits'
 
   assert.deepEqual(tShirtResults.map((product) => product.id), ['black-tshirt']);
   assert.deepEqual(makeupResults.map((product) => product.id), ['makeup-kit']);
+});
+
+test('requires requested color and specific shoe style to match listed products', () => {
+  const exactMatch = matchCatalogProducts(
+    catalog,
+    'black heel shoe',
+    'Enugu',
+    10,
+    { itemType: 'product' },
+  );
+  const missingStyleMatch = matchCatalogProducts(
+    catalog,
+    'black flat shoe',
+    'Enugu',
+    10,
+    { itemType: 'product' },
+  );
+
+  assert.deepEqual(exactMatch.map((product) => product.id), ['black-heel-shoe']);
+  assert.deepEqual(missingStyleMatch, []);
 });
 
 test('matches freelancer roles and category aliases in the catalog', () => {

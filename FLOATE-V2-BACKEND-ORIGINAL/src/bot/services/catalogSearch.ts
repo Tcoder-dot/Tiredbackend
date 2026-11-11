@@ -1,4 +1,5 @@
 import { buildProductUrl } from '../../config/siteUrls.js';
+import { getBrandSearchAliases, normalizeCommerceText, type ParsedCommerceItem } from '../data/searchLexicon.js';
 
 const STOP_WORDS = new Set([
   'a', 'an', 'and', 'are', 'buy', 'can', 'for', 'find', 'get', 'i', 'in', 'is',
@@ -6,10 +7,20 @@ const STOP_WORDS = new Set([
   'the', 'to', 'want', 'where', 'with', 'someone', 'need', 'service', 'services',
 ]);
 
+const REQUIRED_MATCH_TERMS = new Set([
+  'black', 'blue', 'brown', 'green', 'grey', 'gray', 'orange', 'pink', 'purple',
+  'red', 'white', 'yellow', 'heel', 'flat', 'boot', 'loafer', 'leather', 'suede',
+  'canvas', 'denim', 'cotton', 'silk', 'wool',
+]);
+
 const TERM_GROUPS = [
   ['phone', 'phones', 'mobile', 'mobiles', 'smartphone', 'smartphones', 'iphone', 'android'],
   ['laptop', 'laptops', 'notebook', 'notebooks', 'computer', 'computers', 'pc'],
   ['shoe', 'shoes', 'footwear', 'sneaker', 'sneakers', 'trainer', 'trainers'],
+  ['heel', 'heels'],
+  ['flat', 'flats'],
+  ['boot', 'boots'],
+  ['loafer', 'loafers'],
   ['bag', 'bags', 'handbag', 'handbags', 'purse', 'purses', 'backpack', 'backpacks'],
   ['slipper', 'slippers', 'sandal', 'sandals', 'slides', 'slide'],
   ['wig', 'wigs', 'hairpiece', 'hairpieces'],
@@ -46,8 +57,40 @@ function queryTerms(query: string): string[] {
   )];
 }
 
+export function isBroadCategoryProductQuery(query: string): boolean {
+  const normalized = normalizeCommerceText(query)
+    .replace(/&/g, 'and')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const broadCategories = new Set([
+    'footwear',
+    'shoes and slippers',
+    'fashion',
+    'fashion apparel',
+    'clothing',
+    'bags accessories',
+    'electronics',
+    'electronics and gadgets',
+    'electricals',
+    'appliances',
+    'power',
+    'beauty',
+    'home',
+    'home kitchen',
+    'automotive',
+    'provisions',
+    'foodstuff',
+    'grocery',
+    'general goods',
+  ]);
+  return broadCategories.has(normalized);
+}
+
 function termMatches(term: string, textTerms: Set<string>): boolean {
   if (textTerms.has(term)) return true;
+  if (term.length >= 5 && [...textTerms].some((candidate) =>
+    candidate.length >= 5 && editDistance(term, candidate) <= 2
+  )) return true;
   if (term === 'iphone' || term === 'android') return false;
   const group = TERM_GROUPS.find((terms) => terms.includes(term));
   return Boolean(group?.some((variant) => textTerms.has(normalizeToken(variant))));
@@ -81,6 +124,21 @@ export interface CatalogSearchOptions {
   inferredCategories?: string[] | null;
   maxPriceNaira?: number | null;
   itemType?: 'product' | 'service';
+  item?: ParsedCommerceItem;
+}
+
+function editDistance(left: string, right: string): number {
+  const row = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i++) {
+    let diagonal = row[0];
+    row[0] = i;
+    for (let j = 1; j <= right.length; j++) {
+      const previous = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diagonal + Number(left[i - 1] !== right[j - 1]));
+      diagonal = previous;
+    }
+  }
+  return row[right.length];
 }
 
 function parseListedPrice(product: any): number | null {
@@ -133,6 +191,11 @@ export function matchCatalogProducts(
       rawProduct.description,
       ...(Array.isArray(rawProduct.visualTags) ? rawProduct.visualTags : []),
       rawProduct.ocrText,
+      rawProduct.brand,
+      rawProduct.color,
+      rawProduct.size,
+      rawProduct.material,
+      rawProduct.condition,
     ].join(' '));
     const categoryText = normalizeText(rawProduct.category || '');
     const titleTerms = new Set(titleText.split(/\s+/).map(normalizeToken));
@@ -149,6 +212,43 @@ export function matchCatalogProducts(
       termMatches(term, titleTerms) || termMatches(term, detailTerms)
     )) return [];
     if (specificTerms.some((term) => !termMatches(term, titleTerms) && !termMatches(term, detailTerms))) return [];
+    if ([...REQUIRED_MATCH_TERMS].some((term) =>
+      terms.includes(term) && !termMatches(term, titleTerms) && !termMatches(term, detailTerms)
+    )) return [];
+    if (options.item) {
+      const requested = options.item;
+      const searchable = normalizeCommerceText([
+        productName,
+        detailText,
+        categoryText,
+        rawProduct.brand,
+        rawProduct.condition,
+        rawProduct.color,
+        rawProduct.size,
+        rawProduct.material,
+      ].join(' '));
+      const requiredAttributes = [
+        requested.color,
+        requested.size,
+        requested.material,
+      ].filter((value): value is string => Boolean(value));
+      if (requiredAttributes.some((attribute) =>
+        !normalizeCommerceText(searchable).includes(normalizeCommerceText(attribute))
+      )) return [];
+      if (requested.brand && !getBrandSearchAliases(requested.brand).some((alias) =>
+        normalizeCommerceText(searchable).includes(normalizeCommerceText(alias))
+      )) return [];
+      if (requested.condition) {
+        const condition = normalizeCommerceText(requested.condition);
+        const listedCondition = normalizeCommerceText(rawProduct.condition || '');
+        const conditionMatches = condition === 'brand new'
+          ? searchable.includes('brand new') || listedCondition === 'new'
+          : condition === 'uk used'
+            ? /uk used|tokunbo|direct foreign|foreign used/.test(searchable) || listedCondition === 'used'
+            : searchable.includes(condition);
+        if (!conditionMatches) return [];
+      }
+    }
     if (
       !matchedTitleTerms.length &&
       !matchedDetailTerms.length &&

@@ -1,13 +1,15 @@
 import express from 'express';
 import { config, isSafePayEnabledForPhone, isVerificationTestingPhone } from '../config.js';
 import { getPublicSiteUrl, buildMerchantProfileUrl, buildProductUrl, buildRegisterUrl, buildCheckoutUrl } from '../../config/siteUrls.js';
-import { matchCatalogProducts } from './catalogSearch.js';
+import { isBroadCategoryProductQuery, matchCatalogProducts } from './catalogSearch.js';
+import { parseLocalCommerceRequest, resolveSearchPath, type ParsedCommerceItem } from '../data/searchLexicon.js';
 import { sheetsDb, BusinessListing, normalizePhone, escapeMarkdownText, isSpotlightBusiness, formatListingPrice, parsePriceToNumber } from './sheetsService.js';
 import { firestoreDb, EscrowOrderDoc } from './firestoreService.js';
 import { whatsappAuthService } from './whatsappAuthService.js';
 import { matchCoordinatesToNigerianMarket } from './marketGeoService.js';
 import {
   type ParsedCommerceQuery,
+  normalizeParsedShoppingQuery,
   parseShoppingQuery,
   transcribeAndAnalyzeAudio,
   validateSelfieWithGeminiVision,
@@ -4343,6 +4345,33 @@ export async function processMasterWhatsAppEngine(params: {
   const cleanPhone = senderPhone.replace(/\D/g, '');
   const session = getWhatsAppSession(cleanPhone);
 
+  if (text === 'btn_notify_search') {
+    const pending = session.pendingSearchNotifications || [];
+    if (!pending.length) {
+      await sendWhatsAppMessage(cleanPhone, 'There are no pending search alerts to save. Send me an item name and I’ll search again.');
+      return;
+    }
+    const savedCount = await firestoreDb.createSearchAlertSubscriptions(
+      cleanPhone,
+      pending,
+      session.pendingSearchNotificationLocation,
+    );
+    updateWhatsAppSession(cleanPhone, {
+      pendingSearchNotifications: undefined,
+      pendingSearchNotificationLocation: undefined,
+    });
+    const alertDeliveryConfigured = Boolean(process.env.WHATSAPP_SEARCH_ALERT_TEMPLATE);
+    await sendWhatsAppMessage(
+      cleanPhone,
+      savedCount && alertDeliveryConfigured
+        ? `🔔 Search alert saved for ${savedCount} ${savedCount === 1 ? 'item' : 'items'}. We’ll notify you when matching Floate listings become available.`
+        : savedCount
+          ? '🔔 Your search alert is saved, but automatic WhatsApp notifications are not configured yet.'
+        : 'I could not save an alert because this search did not have a clear product category. Please send a more specific item name.',
+    );
+    return;
+  }
+
   // 1. Process Voice Note if present
   if (params.audioId) {
     const hourlySenderLimit = Math.min(12, Math.max(1, Number(process.env.GEMINI_VOICE_TRANSCRIPTIONS_PER_SENDER_PER_HOUR) || 6));
@@ -7247,22 +7276,73 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
   const { queryText, location, parsedQuery } = params;
 
   // 1. AI Parsing with Gemini
-  let parsed = parsedQuery;
-  if (!parsed) {
+  let parsed: ParsedCommerceQuery;
+  if (parsedQuery) {
+    parsed = normalizeParsedShoppingQuery(queryText, parsedQuery);
+  } else {
     try {
       parsed = await parseShoppingQuery(queryText);
     } catch {
-      parsed = { searchKeywords: queryText, targetSellerLocation: location };
+      parsed = normalizeParsedShoppingQuery(queryText, {
+        searchKeywords: queryText,
+        targetSellerLocation: location,
+      });
     }
   }
 
   const cleanProduct = parsed.searchKeywords || queryText;
+  const localItems = parseLocalCommerceRequest(queryText).items;
+  const parsedItems = parsed.items?.length
+    ? parsed.items
+    : localItems.length
+      ? localItems
+      : parsed.category
+        ? [{
+          originalText: queryText,
+          productType: cleanProduct,
+          category: parsed.category,
+          subcategory: parsed.inferredCategories?.[0] || parsed.category,
+          brand: null,
+          color: null,
+          size: null,
+          condition: null,
+          material: null,
+          budget: parsed.maxPriceNaira || null,
+          location: parsed.targetSellerLocation || null,
+          confidence: 0.9,
+        }]
+        : [];
 
   // Resolve buyer account & location hierarchy:
   // 1. Query override (e.g. "shoes in onitsha") takes highest precedence for this search
   // 2. Otherwise default to buyer's saved primaryLocation for proximity prioritization
   const buyer = await firestoreDb.getOrCreateBuyerAccount(toPhone, 'whatsapp', senderName);
   const targetLoc = location || parsed.targetSellerLocation || parsed.buyerLocation || buyer.primaryLocation;
+  if (!parsedItems.length || parsedItems.some((item) => !item.category || item.confidence < 0.75)) {
+    const unclear = parsedItems.find((item) => !item.category || item.confidence < 0.75);
+    const prompt = unclear?.productType
+      ? `Which category should I search for *${unclear.productType}* in?`
+      : 'What kind of product should I search for?';
+    await firestoreDb.logSearch({
+      buyerTelegramId: toPhone,
+      buyerName: senderName || 'Buyer',
+      searchedProduct: cleanProduct,
+      searchedPrice: parsed.maxPriceNaira ? String(parsed.maxPriceNaira) : '',
+      searchedLocation: targetLoc || '',
+      matchFound: 'No',
+      numberOfMatches: 0,
+      channel: 'whatsapp',
+      timestamp: new Date().toISOString(),
+      originalText: queryText,
+      parsedItems,
+      detectedCategory: '',
+      resolutionPath: 'CLARIFYING_QUESTION',
+      usedGemini: Boolean(parsed.usedGemini),
+    });
+    await sendWhatsAppMessage(toPhone, prompt);
+    return;
+  }
+
   if (!targetLoc) {
     updateWhatsAppSession(toPhone, {
       state: 'AWAITING_PRIMARY_LOCATION',
@@ -7275,14 +7355,26 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
     return;
   }
 
+  if (parsedItems.length > 1) {
+    await executeMultiItemSearch(toPhone, senderName, queryText, parsed, parsedItems, targetLoc);
+    return;
+  }
+
   const catalogProducts = await firestoreDb.getAllProducts();
-  const matchedProducts = matchCatalogProducts(catalogProducts, cleanProduct, targetLoc, 10, {
-    category: parsed.category,
-    inferredCategories: parsed.inferredCategories,
-    maxPriceNaira: parsed.maxPriceNaira,
-    itemType: parsed.itemType,
-  });
+  const singleItem = parsedItems[0];
+  const matchedProducts = isBroadCategoryProductQuery(cleanProduct)
+    ? []
+    : matchCatalogProducts(catalogProducts, cleanProduct, targetLoc, 10, {
+      category: parsed.category,
+      inferredCategories: parsed.inferredCategories,
+      maxPriceNaira: parsed.maxPriceNaira,
+      itemType: parsed.itemType,
+      item: singleItem,
+    });
   if (matchedProducts.length > 0) {
+    const resolutionPath = singleItem
+      ? resolveSearchPath(singleItem, true, false)
+      : 'DIRECT_PRODUCT_MATCH';
     await firestoreDb.recordBuyerSearch(toPhone, cleanProduct, targetLoc, matchedProducts.length);
     void firestoreDb.logSearch({
       buyerTelegramId: toPhone,
@@ -7296,6 +7388,11 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
       matchedProductIds: matchedProducts.map((product) => product.id),
       channel: 'whatsapp',
       timestamp: new Date().toISOString(),
+      originalText: queryText,
+      parsedItems,
+      detectedCategory: parsed.category || '',
+      resolutionPath,
+      usedGemini: Boolean(parsed.usedGemini),
     }).catch((error) => console.warn('[WhatsApp Search] Product search metric log notice:', error));
 
     const productLines = matchedProducts.slice(0, 5).map((product, index) => {
@@ -7346,17 +7443,14 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
     }
   }
 
-  // Spotlight prioritization for LOCAL matches
-  const localSpotlight: BusinessListing[] = [];
-  const localOrganic: BusinessListing[] = [];
-  for (const item of localUniqueMatches) {
-    if (isSpotlightBusiness(item.businessName) || item.isHighlyRecommended) {
-      localSpotlight.push(item);
-    } else {
-      localOrganic.push(item);
-    }
-  }
-  const prioritizedLocalListings = [...localSpotlight, ...localOrganic];
+  const isVerifiedListing = (item: BusinessListing) =>
+    Boolean(item.isVerified || item.verifiedStatus === 'YES');
+  const isSpotlightListing = (item: BusinessListing) =>
+    Boolean(isSpotlightBusiness(item.businessName) || item.isHighlyRecommended);
+  const prioritizedLocalListings = localUniqueMatches.sort((left, right) =>
+    Number(isVerifiedListing(right)) - Number(isVerifiedListing(left)) ||
+    Number(isSpotlightListing(right)) - Number(isSpotlightListing(left))
+  );
 
   // Out-of-area listings as fallback/next tier ONLY
   const outOfAreaListings: BusinessListing[] = [];
@@ -7366,25 +7460,52 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
         seenIds.add(m.id);
         outOfAreaListings.push(m);
       }
+      outOfAreaListings.sort((left, right) =>
+        Number(isVerifiedListing(right)) - Number(isVerifiedListing(left))
+      );
     }
   }
 
   // SCENARIO: No matching sellers found anywhere
   if (prioritizedLocalListings.length === 0 && outOfAreaListings.length === 0) {
+    const resolutionPath = singleItem
+      ? resolveSearchPath(singleItem, false, false)
+      : 'EMPTY_CATEGORY';
+    await firestoreDb.logSearch({
+      buyerTelegramId: toPhone,
+      buyerName: senderName || 'Buyer',
+      searchedProduct: cleanProduct,
+      searchedPrice: parsed.maxPriceNaira ? String(parsed.maxPriceNaira) : '',
+      searchedLocation: targetLoc,
+      matchFound: 'No',
+      numberOfMatches: 0,
+      channel: 'whatsapp',
+      timestamp: new Date().toISOString(),
+      originalText: queryText,
+      parsedItems,
+      detectedCategory: parsed.category || '',
+      resolutionPath,
+      usedGemini: Boolean(parsed.usedGemini),
+    });
+    if (singleItem) {
+      updateWhatsAppSession(toPhone, {
+        pendingSearchNotifications: [singleItem],
+        pendingSearchNotificationLocation: targetLoc,
+      });
+    }
     const catNotice = parsed.category ? ` in the *${parsed.category}* category` : '';
     await sendWhatsAppMessage(
       toPhone,
       `*Search Results for:* "${cleanProduct}"${targetLoc ? ` in *${targetLoc}*` : ''}\n\n` +
-      `⚠️ No verified sellers are currently active for this item${catNotice} in our directory.\n\n` +
+      `⚠️ This specific item is not currently listed. No merchants were found${catNotice} in our directory.\n\n` +
       `*Suggestions:*\n` +
-      `• Try searching a broader term (e.g. \`Leather Slippers\` or \`Solar Battery\`).\n` +
       `• New verified merchants join Floate daily.\n` +
       `• Browse top commercial market hubs below:`,
       {
         quickReplies: [
+          ...(singleItem ? [{ id: 'btn_notify_search', title: '🔔 Notify me' }] : []),
           { id: 'btn_browse_markets', title: 'Browse Markets' },
           { id: 'btn_find_product', title: 'New Search' },
-          { id: 'btn_home', title: 'Main Menu' },
         ],
       }
     );
@@ -7395,6 +7516,9 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
   // If local vendors exist in buyer's location, NICHE DOWN ONLY to local vendors!
   const hasLocalVendors = prioritizedLocalListings.length > 0;
   const displayedListings = hasLocalVendors ? prioritizedLocalListings : outOfAreaListings;
+  const resolutionPath = singleItem
+    ? resolveSearchPath(singleItem, searchResults.exactMatches.length > 0, prioritizedLocalListings.length > 0 || outOfAreaListings.length > 0)
+    : 'CATEGORY_MERCHANTS_FALLBACK';
 
   // Record search history for persistent buyer profile
   await firestoreDb.recordBuyerSearch(toPhone, cleanProduct, targetLoc, displayedListings.length);
@@ -7409,6 +7533,11 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
     matchedMerchantPhones: displayedListings.map((listing) => listing.whatsapp),
     channel: 'whatsapp',
     timestamp: new Date().toISOString(),
+    originalText: queryText,
+    parsedItems,
+    detectedCategory: parsed.category || '',
+    resolutionPath,
+    usedGemini: Boolean(parsed.usedGemini),
   }).catch((error) => console.warn('[WhatsApp Search] Vendor search metric log notice:', error));
 
   // Save in user session state for pagination / selection / out-of-area expansion
@@ -7495,6 +7624,199 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
       ],
     },
   });
+}
+
+function getCommerceItemSearchText(item: ParsedCommerceItem): string {
+  return [...new Set([
+    item.condition,
+    item.material,
+    item.color,
+    item.brand,
+    item.productType,
+    item.size,
+  ].filter((value): value is string => Boolean(value)))].join(' ');
+}
+
+async function executeMultiItemSearch(
+  toPhone: string,
+  senderName: string,
+  originalText: string,
+  parsed: ParsedCommerceQuery,
+  items: ParsedCommerceItem[],
+  targetLocation: string,
+): Promise<void> {
+  const catalog = await firestoreDb.getAllProducts();
+  const responseBlocks: string[] = [];
+  const noStockItems: ParsedCommerceItem[] = [];
+
+  for (const [index, item] of items.entries()) {
+    const query = getCommerceItemSearchText(item);
+    const productMatches = isBroadCategoryProductQuery(query)
+      ? []
+      : matchCatalogProducts(catalog, query, targetLocation, 5, {
+        category: item.category,
+        inferredCategories: [item.subcategory || '', item.category || ''].filter(Boolean),
+        maxPriceNaira: item.budget || parsed.maxPriceNaira,
+        itemType: 'product',
+        item,
+      });
+
+    if (productMatches.length) {
+      const path = resolveSearchPath(item, true, false);
+      responseBlocks.push(
+        `*${index + 1}. ${query} — listed products*\n` +
+        productMatches.slice(0, 3).map((product, productIndex) => {
+          const location = [product.city, product.state].filter(Boolean).join(', ');
+          return `${productIndex + 1}) *${product.name}*\n   ${product.price || 'Contact for price'} · ${product.vendor.name}${location ? ` · ${location}` : ''}\n   ${product.productUrl}`;
+        }).join('\n')
+      );
+      await firestoreDb.recordBuyerSearch(toPhone, query, targetLocation, productMatches.length);
+      await firestoreDb.logSearch({
+        buyerTelegramId: toPhone,
+        buyerName: senderName || 'Buyer',
+        searchedProduct: query,
+        searchedPrice: item.budget ? String(item.budget) : '',
+        searchedLocation: targetLocation,
+        matchFound: 'Yes',
+        numberOfMatches: productMatches.length,
+        matchedMerchantPhones: productMatches.map((product) => product.vendorPhone),
+        matchedProductIds: productMatches.map((product) => product.id),
+        channel: 'whatsapp',
+        timestamp: new Date().toISOString(),
+        originalText,
+        parsedItems: [item],
+        detectedCategory: item.category || '',
+        resolutionPath: path,
+        usedGemini: Boolean(parsed.usedGemini),
+      });
+      continue;
+    }
+
+    let merchantResults;
+    try {
+      merchantResults = await sheetsDb.searchBusinessListings(
+        query || item.subcategory || item.category || '',
+        targetLocation,
+        item.category,
+        item.budget || parsed.maxPriceNaira,
+        [item.subcategory || '', item.category || ''].filter(Boolean),
+      );
+    } catch (error) {
+      console.error('[WhatsApp Search] Category fallback failed:', error);
+      merchantResults = { exactMatches: [], categoryMatches: [], outOfAreaRecommendations: [] };
+    }
+
+    if (merchantResults.exactMatches.length) {
+      const exactListings = merchantResults.exactMatches.slice(0, 3);
+      responseBlocks.push(
+        `*${index + 1}. ${query} — matching listed products*\n` +
+        exactListings.map((merchant, merchantIndex) => {
+          const location = [merchant.city, merchant.state].filter(Boolean).join(', ');
+          return `${merchantIndex + 1}) *${merchant.product || item.productType}* · ${merchant.price || 'Contact for price'}\n   ${merchant.businessName}${location ? ` · ${location}` : ''}\n   ${buildMerchantProfileUrl(merchant.businessName || merchant.whatsapp)}`;
+        }).join('\n')
+      );
+      await firestoreDb.recordBuyerSearch(toPhone, query, targetLocation, exactListings.length);
+      await firestoreDb.logSearch({
+        buyerTelegramId: toPhone,
+        buyerName: senderName || 'Buyer',
+        searchedProduct: query,
+        searchedPrice: item.budget ? String(item.budget) : '',
+        searchedLocation: targetLocation,
+        matchFound: 'Yes',
+        numberOfMatches: exactListings.length,
+        matchedMerchantPhones: exactListings.map((merchant) => merchant.whatsapp),
+        channel: 'whatsapp',
+        timestamp: new Date().toISOString(),
+        originalText,
+        parsedItems: [item],
+        detectedCategory: item.category || '',
+        resolutionPath: resolveSearchPath(item, true, false),
+        usedGemini: Boolean(parsed.usedGemini),
+      });
+      continue;
+    }
+
+    const seen = new Set<string>();
+    const merchants = [
+      ...merchantResults.categoryMatches,
+      ...(merchantResults.outOfAreaRecommendations || []),
+    ].filter((merchant) => {
+      if (!merchant?.id || seen.has(merchant.id)) return false;
+      seen.add(merchant.id);
+      return true;
+    }).sort((a, b) => Number(Boolean(b.isVerified || b.verifiedStatus === 'YES')) - Number(Boolean(a.isVerified || a.verifiedStatus === 'YES')));
+
+    if (merchants.length) {
+      const path = resolveSearchPath(item, false, true);
+      const merchantLines = merchants.slice(0, 3).map((merchant, merchantIndex) => {
+        const verification = merchant.isVerified || merchant.verifiedStatus === 'YES' ? 'Verified' : 'Unverified';
+        const location = [merchant.city, merchant.state].filter(Boolean).join(', ');
+        return `${merchantIndex + 1}) *${merchant.businessName}* (${verification}${location ? ` · ${location}` : ''})\n   ${merchant.product || item.subcategory || item.category}\n   ${formatListingPrice(merchant.price)} · ${buildMerchantProfileUrl(merchant.businessName || merchant.whatsapp)}`;
+      });
+      responseBlocks.push(
+        `*${index + 1}. ${query} — specific item not currently listed*\n` +
+        `Merchants in *${item.subcategory || item.category}* near ${targetLocation}:\n${merchantLines.join('\n')}`
+      );
+      await firestoreDb.recordBuyerSearch(toPhone, query, targetLocation, merchants.length);
+      await firestoreDb.logSearch({
+        buyerTelegramId: toPhone,
+        buyerName: senderName || 'Buyer',
+        searchedProduct: query,
+        searchedPrice: item.budget ? String(item.budget) : '',
+        searchedLocation: targetLocation,
+        matchFound: 'Yes',
+        numberOfMatches: merchants.length,
+        matchedMerchantPhones: merchants.map((merchant) => merchant.whatsapp),
+        channel: 'whatsapp',
+        timestamp: new Date().toISOString(),
+        originalText,
+        parsedItems: [item],
+        detectedCategory: item.category || '',
+        resolutionPath: path,
+        usedGemini: Boolean(parsed.usedGemini),
+      });
+      continue;
+    }
+
+    noStockItems.push(item);
+    responseBlocks.push(
+      `*${index + 1}. ${query}*\nNo listed products or merchants were found in *${item.subcategory || item.category}* near ${targetLocation}.`
+    );
+    await firestoreDb.logSearch({
+      buyerTelegramId: toPhone,
+      buyerName: senderName || 'Buyer',
+      searchedProduct: query,
+      searchedPrice: item.budget ? String(item.budget) : '',
+      searchedLocation: targetLocation,
+      matchFound: 'No',
+      numberOfMatches: 0,
+      channel: 'whatsapp',
+      timestamp: new Date().toISOString(),
+      originalText,
+      parsedItems: [item],
+      detectedCategory: item.category || '',
+      resolutionPath: resolveSearchPath(item, false, false),
+      usedGemini: Boolean(parsed.usedGemini),
+    });
+  }
+
+  if (noStockItems.length) {
+    updateWhatsAppSession(toPhone, {
+      pendingSearchNotifications: noStockItems,
+      pendingSearchNotificationLocation: targetLocation,
+    });
+  }
+  await sendWhatsAppMessage(
+    toPhone,
+    `🛍️ *Search results near ${targetLocation}*\n\n${responseBlocks.join('\n\n────────────────────\n\n')}`,
+    {
+      quickReplies: [
+        ...(noStockItems.length ? [{ id: 'btn_notify_search', title: '🔔 Notify me' }] : []),
+        { id: 'btn_find_product', title: 'New Search' },
+        { id: 'btn_home', title: 'Main Menu' },
+      ],
+    },
+  );
 }
 
 // Alias for backward compatibility

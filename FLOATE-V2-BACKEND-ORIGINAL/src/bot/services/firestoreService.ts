@@ -21,6 +21,8 @@ import { sheetsDb, normalizePhone, BusinessListing, parsePriceToNumber, VendorMa
 import { extractInventoryFromVoiceOrPhoto, ExtractedInventoryData } from './aiService.js';
 import { withExternalTimeout } from './timeoutService.js';
 import { compactRelaySessionForStorage, STORAGE_LIMITS } from './storageOptimizer.js';
+import { normalizeCommerceText, type ParsedCommerceItem } from '../data/searchLexicon.js';
+import { config } from '../config.js';
 
 // Load Firebase configuration from firebase-applet-config.json, environment variables, or bundled defaults
 const defaultFirebaseConfig = {
@@ -356,6 +358,11 @@ export interface SearchLogDoc {
   matchedMerchantPhones?: string[];
   matchedProductIds?: string[];
   channel?: 'whatsapp' | 'telegram' | 'web' | string;
+  originalText?: string;
+  parsedItems?: Array<Record<string, unknown>>;
+  detectedCategory?: string;
+  resolutionPath?: 'DIRECT_PRODUCT_MATCH' | 'CATEGORY_MERCHANTS_FALLBACK' | 'CLARIFYING_QUESTION' | 'EMPTY_CATEGORY';
+  usedGemini?: boolean;
 }
 
 export interface ProductDoc {
@@ -815,6 +822,11 @@ export class FirestoreService {
           matchedMerchantPhones: [...new Set((data.matchedMerchantPhones || []).map(normalizePhone).filter(Boolean))],
           matchedProductIds: [...new Set((data.matchedProductIds || []).filter(Boolean))],
           channel: data.channel || 'telegram',
+          ...(data.originalText !== undefined ? { originalText: data.originalText } : {}),
+          ...(data.parsedItems !== undefined ? { parsedItems: data.parsedItems } : {}),
+          ...(data.detectedCategory !== undefined ? { detectedCategory: data.detectedCategory } : {}),
+          ...(data.resolutionPath !== undefined ? { resolutionPath: data.resolutionPath } : {}),
+          ...(data.usedGemini !== undefined ? { usedGemini: data.usedGemini } : {}),
         };
         await setDoc(doc(db, 'search_logs', id), this.sanitizeForFirestore(docData));
       },
@@ -825,6 +837,32 @@ export class FirestoreService {
         fallbackValue: undefined,
       }
     );
+  }
+
+  public async createSearchAlertSubscriptions(
+    buyerPhone: string,
+    items: ParsedCommerceItem[],
+    location?: string | null,
+  ): Promise<number> {
+    const phone = normalizePhone(buyerPhone);
+    if (!phone || !items.length) return 0;
+    let saved = 0;
+    for (const item of items) {
+      if (!item.category) continue;
+      const key = `${phone}_${item.category}_${item.productType}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 140);
+      await setDoc(doc(db, 'search_subscriptions', key), this.sanitizeForFirestore({
+        id: key,
+        buyerPhone: phone,
+        productType: item.productType,
+        category: item.category,
+        subcategory: item.subcategory || '',
+        location: location || item.location || '',
+        active: true,
+        createdAt: new Date().toISOString(),
+      }), { merge: true });
+      saved++;
+    }
+    return saved;
   }
 
   /**
@@ -2236,6 +2274,7 @@ export class FirestoreService {
       businessName: string;
       product: string;
       price: string;
+      category?: string;
       city?: string;
       state?: string;
       whatsapp: string;
@@ -2246,13 +2285,12 @@ export class FirestoreService {
     const notifiedBuyerIds: string[] = [];
 
     try {
-      // Query recent buyer search logs in Firestore
       const snap = await getDocs(collection(db, 'search_logs'));
       const matchingLogs: SearchLogDoc[] = [];
 
       snap.forEach((d) => {
         const log = d.data() as SearchLogDoc;
-        if (!log.buyerTelegramId) return;
+        if (!log.buyerTelegramId || log.channel === 'whatsapp' || log.channel === 'web') return;
         const searchedNorm = (log.searchedProduct || '').toLowerCase();
         if (
           searchedNorm.includes(prodNameNorm) ||
@@ -2263,12 +2301,28 @@ export class FirestoreService {
         }
       });
 
-      // Unique buyer IDs
+      const subscriptionSnapshot = await getDocs(collection(db, 'search_subscriptions'));
+      const normalizedProduct = normalizeCommerceText(productDoc.product);
+      const normalizedCategory = normalizeCommerceText(productDoc.category || '');
+      const whatsappSubscriptions = new Map<string, string[]>();
+      subscriptionSnapshot.forEach((subscription) => {
+        const data = subscription.data();
+        if (!data.active || !data.buyerPhone) return;
+        const subProduct = normalizeCommerceText(String(data.productType || ''));
+        const subCategory = normalizeCommerceText(String(data.category || ''));
+        const matchesProduct = subProduct.length > 2 &&
+          (normalizedProduct.includes(subProduct) || subProduct.includes(normalizedProduct));
+        const matchesCategory = Boolean(normalizedCategory && normalizedCategory === subCategory);
+        const buyerPhone = normalizePhone(String(data.buyerPhone));
+        if (buyerPhone && (matchesProduct || matchesCategory)) {
+          whatsappSubscriptions.set(buyerPhone, [...(whatsappSubscriptions.get(buyerPhone) || []), subscription.id]);
+        }
+      });
+
       const uniqueBuyers = Array.from(new Set(matchingLogs.map((l) => String(l.buyerTelegramId))));
       const locStr = [productDoc.city, productDoc.state].filter(Boolean).join(', ') || 'Nigeria';
 
       for (const buyerId of uniqueBuyers) {
-        // Log alert in Firestore
         const alertId = `alert-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
         const alertDoc: RestockAlertDoc = {
           id: alertId,
@@ -2285,7 +2339,6 @@ export class FirestoreService {
         await setDoc(doc(db, 'restock_alerts', alertId), this.sanitizeForFirestore(alertDoc));
         notifiedBuyerIds.push(buyerId);
 
-        // Send Telegram Broadcast Notification if bot instance is provided
         if (botApi && typeof botApi.sendMessage === 'function') {
           try {
             const messageText =
@@ -2302,6 +2355,53 @@ export class FirestoreService {
             console.warn(`[Broadcast Lead Radar] Could not send message to Telegram buyer ${buyerId}:`, msgErr);
           }
         }
+      }
+
+      const waToken = process.env.WHATSAPP_ACCESS_TOKEN || config.whatsappAccessToken;
+      const waPhoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID || config.whatsappPhoneNumberId;
+      const waTemplateName = process.env.WHATSAPP_SEARCH_ALERT_TEMPLATE;
+      if (whatsappSubscriptions.size && waToken && waPhoneNumberId && waTemplateName) {
+        for (const [buyerPhone, subscriptionIds] of whatsappSubscriptions) {
+          const response = await fetch(`https://graph.facebook.com/v20.0/${waPhoneNumberId}/messages`, {
+            method: 'POST',
+            headers: {
+              Authorization: 'Bearer ' + waToken,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              messaging_product: 'whatsapp',
+              to: buyerPhone,
+              type: 'template',
+              template: {
+                name: waTemplateName,
+                language: { code: process.env.WHATSAPP_SEARCH_ALERT_TEMPLATE_LANGUAGE || 'en' },
+                components: [{
+                  type: 'body',
+                  parameters: [
+                    { type: 'text', text: String(productDoc.product).slice(0, 80) },
+                    { type: 'text', text: String(productDoc.businessName).slice(0, 80) },
+                    { type: 'text', text: locStr.slice(0, 80) },
+                    { type: 'text', text: String(productDoc.price).slice(0, 40) },
+                  ],
+                }],
+              },
+            }),
+          });
+          if (!response.ok) {
+            const responseText = await response.text();
+            console.warn(`[Broadcast Lead Radar] WhatsApp alert failed for ${buyerPhone}: ${response.status} ${responseText.slice(0, 300)}`);
+            continue;
+          }
+          await Promise.all(subscriptionIds.map((id) =>
+            updateDoc(doc(db, 'search_subscriptions', id), {
+              active: false,
+              lastNotifiedAt: new Date().toISOString(),
+              lastNotifiedProductId: productDoc.id || '',
+            })
+          ));
+        }
+      } else if (whatsappSubscriptions.size) {
+        console.info('[Broadcast Lead Radar] WhatsApp search alerts are subscribed; configure WHATSAPP_SEARCH_ALERT_TEMPLATE to send approved template notifications.');
       }
     } catch (err) {
       console.error('[Firestore] Error executing Broadcast Lead Radar:', err);

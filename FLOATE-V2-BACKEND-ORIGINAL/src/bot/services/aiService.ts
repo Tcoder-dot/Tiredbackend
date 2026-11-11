@@ -2,6 +2,7 @@ import { GoogleGenAI } from '@google/genai';
 import { config } from '../config.js';
 import { withExternalTimeout } from './timeoutService.js';
 import { parseSearchQuery } from '../../lib/searchCategoryMatcher.js';
+import { parseLocalCommerceRequest, type ParsedCommerceItem } from '../data/searchLexicon.js';
 
 let aiInstance: GoogleGenAI | null = null;
 
@@ -113,6 +114,8 @@ export interface ParsedCommerceQuery {
   category?: string | null; // Broader category e.g. "Electronics", "Footwear", "Legal Services"
   inferredCategories?: string[]; // Tightly-related categories/services inferred by AI, e.g. ["Legal Services", "Legal Consultation", "Attorney", "Law Firm"]
   itemType?: 'product' | 'service'; // Gemini's judgment on whether the item is a product or service
+  items?: ParsedCommerceItem[];
+  usedGemini?: boolean;
   isRegistrationRequest?: boolean;
   friendlyAck?: string;
 }
@@ -563,6 +566,11 @@ export async function classifyInboundIntent(rawInput: string): Promise<InboundCl
     /^(?:my\s+business|my\s+store|my\s+shop|my\s+biz|open\s+my\s+business|access\s+my\s+business|manage\s+my\s+business|manage\s+my\s+store|manage\s+my\s+shop|business\s+portal|merchant\s+portal|vendor\s+portal|vendor\s+hub|merchant\s+hub|register\s+business|register\s+my\s+business|register\s+shop|register\s+store|sell\s+on\s+floate|start\s+selling|vendor\s+registration|merchant\s+registration)$/i.test(lower)
   ) {
     return { intent: 'MERCHANT_PORTAL', confidence: 1.0, rawText: text };
+  }
+
+  const localCommerceRequest = parseLocalCommerceRequest(text);
+  if (localCommerceRequest.usedLocalLexicon) {
+    return { intent: 'BUYER_SEARCH', confidence: 0.96, rawText: text };
   }
 
   // Fast buyer-search path: if the user already said what they want, do not force a clarification loop.
@@ -1453,31 +1461,146 @@ Return ONLY valid JSON.`;
 const queryParseCache = new Map<string, { data: ParsedCommerceQuery; timestamp: number }>();
 const QUERY_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getKnownLocationInText(text: string, prefix: string, includePreposition = true): string | null {
+  const locations = [...NIGERIAN_LOCATIONS_DATABASE].sort((a, b) => b.length - a.length);
+  const locationPattern = locations.map(escapeRegex).join('|');
+  const prepositionPattern = includePreposition ? '\\s+(?:in|at)\\s+' : '\\s+';
+  const match = text.match(new RegExp(`\\b(?:${prefix})${prepositionPattern}(${locationPattern})\\b`, 'i'));
+  if (!match) return null;
+  return locations.find((location) => location.toLowerCase() === match[1].toLowerCase()) || null;
+}
+
+function cleanShoppingSearchText(value: string): string {
+  const locations = [...NIGERIAN_LOCATIONS_DATABASE].sort((a, b) => b.length - a.length);
+  const locationPattern = locations.map(escapeRegex).join('|');
+  return value
+    .replace(/\b(?:hello|hi|hey)\s+(?:floate(?:\s+ai)?|there)\b[,!:\s]*/gi, ' ')
+    .replace(/\b(?:hello|hi|hey|floate(?:\s+ai)?)\b/gi, ' ')
+    .replace(new RegExp(`\\b(?:i\\s+am|i'm|im|we\\s+are|we're)\\s+(?:currently\\s+)?(?:in|at)\\s+(?:the\\s+)?(?:${locationPattern})\\b`, 'gi'), ' ')
+    .replace(new RegExp(`\\b(?:in|at|near|around|from)\\s+(?:the\\s+)?(?:${locationPattern})\\b`, 'gi'), ' ')
+    .replace(/\b(?:a|an|the)\b/gi, ' ')
+    .replace(/\b(?:where\s+can\s+i\s+(?:find|buy|get)|where\s+(?:can|do)\s+i\s+find|i\s+would\s+like\s+to\s+buy|i\s+want\s+to\s+buy|i\s+need\s+to\s+buy|i\s+am\s+looking\s+for|i'm\s+looking\s+for|looking\s+for|search(?:ing)?\s+for|find\s+me|i\s+want|i\s+need|can\s+i\s+get|i\s+would\s+like|buy\s+me)\b/gi, ' ')
+    .replace(/\bfor\s+(?:my\s+)?(?:graduation|wedding|birthday|party|christmas|easter|valentine(?:'s)?|anniversary|prom)\b.*$/i, ' ')
+    .replace(/\b(?:under|below|less\s+than|up\s+to|budget\s+(?:of|is))\s*(?:₦|naira|ngn)?\s*\d[\d,.]*\s*(?:k|m)?\b/gi, ' ')
+    .replace(/(?:₦|naira|ngn)\s*\d[\d,.]*(?:\s*(?:k|m))?/gi, ' ')
+    .replace(/\b\d+(?:\.\d+)?\s*(?:k|m)\b/gi, ' ')
+    .replace(/\bhill(?=\s+(?:shoe|shoes|footwear|heels?|flats?|sneakers?|boots?))\b/gi, 'heel')
+    .replace(/[^a-z0-9&+.-]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function normalizeParsedShoppingQuery(
+  userQuery: string,
+  parsed: ParsedCommerceQuery,
+): ParsedCommerceQuery {
+  const localRequest = parseLocalCommerceRequest(userQuery);
+  const localItems = localRequest.items;
+  if (localItems.length && localItems.every((item) => item.category && item.confidence >= 0.75)) {
+    const firstItem = localItems[0];
+    const searchKeywords = (item: ParsedCommerceItem) =>
+      [...new Set([item.condition, item.material, item.color, item.brand, item.productType, item.size].filter(Boolean))].join(' ');
+    const itemKeywords = localItems.map(searchKeywords);
+    return {
+      ...parsed,
+      searchKeywords: itemKeywords[0] || firstItem.productType,
+      maxPriceNaira: localRequest.budget ?? parsed.maxPriceNaira ?? null,
+      buyerLocation: parsed.buyerLocation || null,
+      targetSellerLocation: localRequest.location || parsed.targetSellerLocation || null,
+      category: firstItem.category,
+      inferredCategories: [...new Set(localItems.flatMap((item) => [item.subcategory, item.category].filter((value): value is string => Boolean(value))))],
+      itemType: 'product',
+      items: localItems,
+    };
+  }
+
+  const cleanKeywords = cleanShoppingSearchText(parsed.searchKeywords || '');
+  const cleanedRawQuery = cleanShoppingSearchText(userQuery);
+  const buyerLocation =
+    getKnownLocationInText(userQuery, "i\\s+am|i'm|im|i\\s+live|i\\s+stay") ||
+    getKnownLocationInText(userQuery, 'my\\s+location\\s+is', false);
+  const explicitSellerLocation = buyerLocation
+    ? null
+    : getKnownLocationInText(userQuery, 'in|at|near|around|from', false);
+  const searchKeywords = cleanedRawQuery || cleanKeywords || userQuery.trim();
+  const footwearQuery = /\b(?:footwear|footwears|shoe|shoes|sneaker|sneakers|trainer|trainers|slipper|slippers|sandal|sandals|slide|slides|heels?|flats?|boots?|loafers?)\b/i.test(searchKeywords);
+  const bagQuery = /\b(?:bag|bags|handbag|handbags|purse|purses|tote|totes|backpack|backpacks|clutch|clutches|duffel|duffle)\b/i.test(searchKeywords);
+
+  if (footwearQuery) {
+    return {
+      ...parsed,
+      searchKeywords,
+      buyerLocation: buyerLocation || parsed.buyerLocation || null,
+      targetSellerLocation: explicitSellerLocation || (buyerLocation ? null : parsed.targetSellerLocation || null),
+      category: 'Footwear',
+      inferredCategories: ['Footwear', 'Shoes', 'Slippers', 'Sandals'],
+      itemType: 'product',
+    };
+  }
+
+  if (bagQuery) {
+    return {
+      ...parsed,
+      searchKeywords,
+      buyerLocation: buyerLocation || parsed.buyerLocation || null,
+      targetSellerLocation: explicitSellerLocation || (buyerLocation ? null : parsed.targetSellerLocation || null),
+      category: 'Bags & Accessories',
+      inferredCategories: ['Bags', 'Handbags', 'Backpacks', 'Purses'],
+      itemType: 'product',
+    };
+  }
+
+  return {
+    ...parsed,
+    searchKeywords,
+    buyerLocation: buyerLocation || parsed.buyerLocation || null,
+    targetSellerLocation: explicitSellerLocation || (buyerLocation ? null : parsed.targetSellerLocation || null),
+  };
+}
+
 /**
  * Parses natural language shopping queries (English, Pidgin, Yoruba, Igbo) into structured search parameters using Gemini API.
  */
 export async function parseShoppingQuery(userQuery: string): Promise<ParsedCommerceQuery> {
   const normKey = (userQuery || '').toLowerCase().trim();
-  if (!normKey) return fallbackQueryParse(userQuery);
+  if (!normKey) return normalizeParsedShoppingQuery(userQuery, fallbackQueryParse(userQuery));
+
+  const localRequest = parseLocalCommerceRequest(userQuery);
+  if (localRequest.usedLocalLexicon) {
+    return normalizeParsedShoppingQuery(userQuery, {
+      searchKeywords: localRequest.items[0]?.productType || localRequest.normalizedText,
+      maxPriceNaira: localRequest.budget,
+      targetSellerLocation: localRequest.location,
+      category: localRequest.items[0]?.category,
+      inferredCategories: localRequest.items.map((item) => item.subcategory).filter((value): value is string => Boolean(value)),
+      itemType: 'product',
+      items: localRequest.items,
+      usedGemini: false,
+    });
+  }
 
   // Check cache first
   const cached = queryParseCache.get(normKey);
   if (cached && Date.now() - cached.timestamp < QUERY_CACHE_TTL_MS) {
-    return cached.data;
+    return normalizeParsedShoppingQuery(userQuery, cached.data);
   }
 
   const needsNaturalLanguageParsing =
     /\b(?:i|we|my|our|looking|need|want|buy|find|search|show|recommend|can|where|who|cheap|cheapest|cost|price|under|below|budget|within|around|near|from|in|at|for|to|with|deliver|delivery|seller|merchant|vendor)\b/i.test(userQuery) ||
     /(?:₦|naira|ngn|\b\d+(?:\.\d+)?\s*(?:k|m)\b)/i.test(userQuery);
   if (!needsNaturalLanguageParsing) {
-    const fallback = fallbackQueryParse(userQuery);
+    const fallback = normalizeParsedShoppingQuery(userQuery, fallbackQueryParse(userQuery));
     queryParseCache.set(normKey, { data: fallback, timestamp: Date.now() });
     return fallback;
   }
 
   const ai = getAIClient();
   if (!ai) {
-    const fallback = fallbackQueryParse(userQuery);
+    const fallback = normalizeParsedShoppingQuery(userQuery, fallbackQueryParse(userQuery));
     queryParseCache.set(normKey, { data: fallback, timestamp: Date.now() });
     return fallback;
   }
@@ -1531,7 +1654,7 @@ Return ONLY valid JSON format like:
 
       const parsedItemType: 'product' | 'service' = json.itemType === 'service' ? 'service' : 'product';
 
-      return {
+      return normalizeParsedShoppingQuery(userQuery, {
         searchKeywords: json.cleanProduct || userQuery,
         maxPriceNaira: typeof json.maxPriceNaira === 'number' ? json.maxPriceNaira : null,
         buyerLocation: json.buyerLocation || null,
@@ -1541,10 +1664,11 @@ Return ONLY valid JSON format like:
         itemType: parsedItemType,
         isRegistrationRequest: Boolean(json.isRegistrationRequest),
         friendlyAck: `Connecting you to a verified seller for ${json.cleanProduct || 'items'}...`,
-      };
+        usedGemini: true,
+      });
     } catch (err) {
       console.warn('AI query parsing notice, using fallback:', err);
-      return fallbackQueryParse(userQuery);
+      return normalizeParsedShoppingQuery(userQuery, fallbackQueryParse(userQuery));
     }
   })();
 
@@ -1555,11 +1679,11 @@ Return ONLY valid JSON format like:
       timeoutMs: 8500,
       serviceName: 'Gemini',
       operationName: 'parseShoppingQuery',
-      fallbackValue: fallbackQueryParse(userQuery),
+      fallbackValue: normalizeParsedShoppingQuery(userQuery, fallbackQueryParse(userQuery)),
     }
   );
   queryParseCache.set(normKey, { data: result, timestamp: Date.now() });
-  return result;
+  return normalizeParsedShoppingQuery(userQuery, result);
 }
 
 function fallbackQueryParse(query: string): ParsedCommerceQuery {

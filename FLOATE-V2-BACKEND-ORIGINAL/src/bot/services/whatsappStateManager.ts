@@ -365,6 +365,14 @@ export interface WhatsAppUserSessionState {
   referredBy?: string;
   referralCode?: string;
   pendingInitialText?: string;
+  pendingSearchNotifications?: Array<{
+    productType: string;
+    category: string | null;
+    subcategory: string | null;
+    originalText: string;
+    confidence: number;
+  }>;
+  pendingSearchNotificationLocation?: string;
   pendingLocationConfirmation?: {
     suggestedLocation: string;
     originalInput: string;
@@ -684,4 +692,3 @@ export function pruneStaleSessions(): { prunedUserSessions: number; prunedRelays
 
   return { prunedUserSessions, prunedRelays };
 }
-
