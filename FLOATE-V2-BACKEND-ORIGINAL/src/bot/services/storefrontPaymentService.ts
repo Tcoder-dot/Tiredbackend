@@ -15,7 +15,8 @@ import { flutterwaveService } from "./flutterwaveService.js";
 
 const PRODUCT_SLOT_PRICE_NGN = 1000;
 const PRODUCT_SLOT_COUNT = 5;
-const PRODUCT_BOOST_PRICE_PER_DAY_NGN = 500;
+const PRODUCT_BOOST_PRICE_PER_WEEK_NGN = 2000;
+const BOOST_DAYS_PER_WEEK = 7;
 const VERIFIED_BADGE_PRICE_NGN = 7000;
 const BUSINESS_AD_PRICE_PER_THOUSAND_VIEWS_NGN = 600;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -152,9 +153,11 @@ export async function createStorefrontCheckout(input: {
   } else if (type === "PRODUCT_BOOST") {
     productId = String(input.productId || "").trim();
     durationDays = Number(input.durationDays);
-    if (!productId || !Number.isSafeInteger(durationDays) || durationDays < 1 ||
-        !Number.isSafeInteger(PRODUCT_BOOST_PRICE_PER_DAY_NGN * durationDays)) {
-      throw new Error("Choose a product and a valid positive whole number of boost days.");
+    const durationWeeks = durationDays / BOOST_DAYS_PER_WEEK;
+    if (!productId || !Number.isSafeInteger(durationDays) || durationDays < BOOST_DAYS_PER_WEEK ||
+        durationDays % BOOST_DAYS_PER_WEEK !== 0 ||
+        !Number.isSafeInteger(PRODUCT_BOOST_PRICE_PER_WEEK_NGN * durationWeeks)) {
+      throw new Error("Choose a product and a valid positive whole number of boost weeks.");
     }
 
     const productSnapshot = await getDoc(doc(db, "products", productId));
@@ -175,7 +178,7 @@ export async function createStorefrontCheckout(input: {
     if (boostStartsAt + durationDays * DAY_MS > MAX_DATE_MS) {
       throw new Error("The selected boost duration is outside the supported date range.");
     }
-    amountNaira = PRODUCT_BOOST_PRICE_PER_DAY_NGN * durationDays;
+    amountNaira = PRODUCT_BOOST_PRICE_PER_WEEK_NGN * durationWeeks;
   } else if (type === "VERIFIED_BADGE") {
     amountNaira = VERIFIED_BADGE_PRICE_NGN;
   } else {
@@ -278,7 +281,7 @@ export async function createStorefrontCheckout(input: {
       customerName: merchant.name,
       customerEmail: String(merchant.data.email || merchant.data.emailAddress || `merchant_${merchantPhone}@floate.xyz`),
       title: `Floate • ${type === "PRODUCT_SLOTS" ? "5 product slots" :
-        type === "PRODUCT_BOOST" ? `${durationDays} day product boost` :
+        type === "PRODUCT_BOOST" ? `${durationDays / BOOST_DAYS_PER_WEEK} week product boost` :
         type === "VERIFIED_BADGE" ? "3-month verified badge" : "merchant ad campaign"}`,
       description: type === "BUSINESS_AD"
         ? `${impressionThousands} x 1,000 ad views for ${merchant.name}`
