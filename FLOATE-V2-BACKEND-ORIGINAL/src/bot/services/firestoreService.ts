@@ -227,6 +227,7 @@ export interface MerchantDoc {
   cacInfo?: string;
   photoUrl?: string;
   isVerifiedPlus?: boolean;
+  paidVerificationBadgeExpiresAt?: string;
   boostCredits?: number;
   certificateId?: string;
   certificateUrl?: string;

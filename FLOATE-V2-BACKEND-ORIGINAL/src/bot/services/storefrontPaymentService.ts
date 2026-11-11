@@ -6,19 +6,38 @@ import {
   getDocs,
   runTransaction,
   setDoc,
-  updateDoc
+  updateDoc,
+  type DocumentReference
 } from "firebase/firestore";
 import { db } from "./firestoreService.js";
 import { normalizeWhatsAppNumber } from "../../utils/whatsapp.js";
+import { flutterwaveService } from "./flutterwaveService.js";
 
 const PRODUCT_SLOT_PRICE_NGN = 1000;
 const PRODUCT_SLOT_COUNT = 5;
 const PRODUCT_BOOST_PRICE_PER_DAY_NGN = 500;
-const MAX_PRODUCT_BOOST_DAYS = 365;
+const VERIFIED_BADGE_PRICE_NGN = 7000;
+const BUSINESS_AD_PRICE_PER_THOUSAND_VIEWS_NGN = 600;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_DATE_MS = 8_640_000_000_000_000;
 const PAYMENT_COLLECTION = "storefront_payments";
 const WEBHOOK_EVENT_COLLECTION = "bachs_webhook_events";
+const FLUTTERWAVE_EVENT_COLLECTION = "flutterwave_storefront_events";
 
-type StorefrontPurchaseType = "PRODUCT_SLOTS" | "PRODUCT_BOOST";
+type StorefrontPurchaseType = "PRODUCT_SLOTS" | "PRODUCT_BOOST" | "VERIFIED_BADGE" | "BUSINESS_AD";
+
+interface BusinessAdDetails {
+  merchantName: string;
+  headline: string;
+  description: string;
+  ctaText: string;
+  targetUrl: string;
+  bannerUrl: string;
+  productTitle?: string;
+  productId?: string;
+  targetCities: string[];
+  targetCategories: string[];
+}
 
 interface StorefrontPaymentRecord {
   reference: string;
@@ -29,9 +48,12 @@ interface StorefrontPaymentRecord {
   type: StorefrontPurchaseType;
   productId?: string;
   durationDays?: number;
+  impressionThousands?: number;
+  adDetails?: BusinessAdDetails;
   amountNaira: number;
   status: "PENDING" | "SUCCEEDED" | "FAILED" | "REVIEW";
   checkoutId?: string;
+  transactionId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -104,11 +126,12 @@ export async function createStorefrontCheckout(input: {
   type: unknown;
   productId?: unknown;
   durationDays?: unknown;
+  impressionThousands?: unknown;
+  adDetails?: unknown;
 }) {
   const merchantPhone = normalizePhone(input.merchantPhone);
-  const type = input.type === "PRODUCT_SLOTS" || input.type === "PRODUCT_BOOST"
-    ? input.type
-    : null;
+  const purchaseTypes: StorefrontPurchaseType[] = ["PRODUCT_SLOTS", "PRODUCT_BOOST", "VERIFIED_BADGE", "BUSINESS_AD"];
+  const type = purchaseTypes.find((purchaseType) => purchaseType === input.type) || null;
   if (!merchantPhone || !type) {
     throw new Error("A registered merchant and valid purchase type are required.");
   }
@@ -120,15 +143,18 @@ export async function createStorefrontCheckout(input: {
 
   let productId: string | undefined;
   let durationDays: number | undefined;
+  let impressionThousands: number | undefined;
+  let adDetails: BusinessAdDetails | undefined;
   let amountNaira: number;
 
   if (type === "PRODUCT_SLOTS") {
     amountNaira = PRODUCT_SLOT_PRICE_NGN;
-  } else {
+  } else if (type === "PRODUCT_BOOST") {
     productId = String(input.productId || "").trim();
     durationDays = Number(input.durationDays);
-    if (!productId || !Number.isInteger(durationDays) || durationDays < 1 || durationDays > MAX_PRODUCT_BOOST_DAYS) {
-      throw new Error(`Choose a product and a boost duration between 1 and ${MAX_PRODUCT_BOOST_DAYS} days.`);
+    if (!productId || !Number.isSafeInteger(durationDays) || durationDays < 1 ||
+        !Number.isSafeInteger(PRODUCT_BOOST_PRICE_PER_DAY_NGN * durationDays)) {
+      throw new Error("Choose a product and a valid positive whole number of boost days.");
     }
 
     const productSnapshot = await getDoc(doc(db, "products", productId));
@@ -142,7 +168,81 @@ export async function createStorefrontCheckout(input: {
     if (productPhone !== merchantPhone) {
       throw new Error("You can only boost a product belonging to your own business.");
     }
+    const activeBoostExpiry = Date.parse(String(product.boostedUntil || ""));
+    const boostStartsAt = Number.isFinite(activeBoostExpiry) && activeBoostExpiry > Date.now()
+      ? activeBoostExpiry
+      : Date.now();
+    if (boostStartsAt + durationDays * DAY_MS > MAX_DATE_MS) {
+      throw new Error("The selected boost duration is outside the supported date range.");
+    }
     amountNaira = PRODUCT_BOOST_PRICE_PER_DAY_NGN * durationDays;
+  } else if (type === "VERIFIED_BADGE") {
+    amountNaira = VERIFIED_BADGE_PRICE_NGN;
+  } else {
+    const raw = input.adDetails && typeof input.adDetails === "object"
+      ? input.adDetails as Record<string, unknown>
+      : {};
+    const headline = String(raw.headline || "").trim().slice(0, 180);
+    const description = String(raw.description || "").trim().slice(0, 600);
+    const ctaText = String(raw.ctaText || "Shop now").trim().slice(0, 60);
+    const targetUrl = String(raw.targetUrl || "").trim().slice(0, 2048);
+    const bannerUrl = String(raw.bannerUrl || "").trim().slice(0, 2048);
+    const targetCities = Array.isArray(raw.targetCities)
+      ? raw.targetCities.map((item) => String(item).trim()).filter(Boolean).slice(0, 50)
+      : [];
+    const targetCategories = Array.isArray(raw.targetCategories)
+      ? raw.targetCategories.map((item) => String(item).trim()).filter(Boolean).slice(0, 50)
+      : [];
+    impressionThousands = Number(input.impressionThousands);
+    if (!headline || !targetUrl || !bannerUrl) {
+      throw new Error("Provide an ad headline, destination link, and banner image.");
+    }
+    if (!Number.isSafeInteger(impressionThousands) || impressionThousands < 1 ||
+        !Number.isSafeInteger(impressionThousands * 1000) ||
+        !Number.isSafeInteger(impressionThousands * BUSINESS_AD_PRICE_PER_THOUSAND_VIEWS_NGN)) {
+      throw new Error("Choose a valid positive whole number of 1,000-view blocks.");
+    }
+    let parsedTarget: URL;
+    let parsedBanner: URL;
+    try {
+      parsedTarget = new URL(targetUrl);
+      parsedBanner = new URL(bannerUrl);
+    } catch {
+      throw new Error("The ad destination and banner must be valid URLs.");
+    }
+    if (!["http:", "https:"].includes(parsedTarget.protocol) ||
+        parsedBanner.protocol !== "https:" ||
+        parsedBanner.hostname !== "res.cloudinary.com") {
+      throw new Error("Use an HTTP(S) destination and an uploaded Floate banner image.");
+    }
+
+    productId = String(raw.productId || "").trim() || undefined;
+    let productTitle: string | undefined;
+    if (productId) {
+      const productSnapshot = await getDoc(doc(db, "products", productId));
+      if (!productSnapshot.exists()) throw new Error("The selected ad product could not be found.");
+      const product = productSnapshot.data();
+      const productPhone = normalizePhone(
+        product.vendorPhone || product.whatsapp || product.whatsappNumber || product.phone
+      );
+      if (productPhone !== merchantPhone) {
+        throw new Error("You can only advertise a product belonging to your own business.");
+      }
+      productTitle = String(product.title || product.name || "").trim();
+    }
+
+    adDetails = {
+      merchantName: merchant.name,
+      headline,
+      description,
+      ctaText: ctaText || "Shop now",
+      targetUrl,
+      bannerUrl,
+      ...(productId ? { productId, productTitle } : {}),
+      targetCities,
+      targetCategories,
+    };
+    amountNaira = impressionThousands * BUSINESS_AD_PRICE_PER_THOUSAND_VIEWS_NGN;
   }
 
   const reference = `FLT-${randomUUID().replace(/-/g, "").toUpperCase()}`;
@@ -156,6 +256,8 @@ export async function createStorefrontCheckout(input: {
     type,
     ...(productId ? { productId } : {}),
     ...(durationDays ? { durationDays } : {}),
+    ...(impressionThousands ? { impressionThousands } : {}),
+    ...(adDetails ? { adDetails } : {}),
     amountNaira,
     status: "PENDING",
     createdAt: now,
@@ -166,34 +268,44 @@ export async function createStorefrontCheckout(input: {
 
   const siteUrl = (process.env.PUBLIC_SITE_URL || "https://www.floate.xyz").replace(/\/+$/, "");
   try {
-    const checkout = await bachsRequest("/v1/checkout-sessions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": reference
-      },
-      body: JSON.stringify({
-        pricing: { currency: "NGN", amount: amountNaira.toFixed(2) },
-        reference,
-        metadata: {
-          floate_payment_reference: reference,
-          purchase_type: type,
-          merchant_phone: merchantPhone,
-          ...(productId ? { product_id: productId } : {}),
-          ...(durationDays ? { duration_days: String(durationDays) } : {})
-        },
-        success_url: buildReturnUrl(siteUrl, merchant.slug, reference, "success"),
-        cancel_url: buildReturnUrl(siteUrl, merchant.slug, reference, "cancelled")
-      })
+    if (!process.env.FLW_SECRET_KEY) {
+      throw new Error("Flutterwave checkout is not configured. Add FLW_SECRET_KEY to the backend environment.");
+    }
+    const checkout = await flutterwaveService.createPaymentLink({
+      txRef: reference,
+      amount: amountNaira,
+      customerPhone: merchantPhone,
+      customerName: merchant.name,
+      customerEmail: String(merchant.data.email || merchant.data.emailAddress || `merchant_${merchantPhone}@floate.xyz`),
+      title: `Floate • ${type === "PRODUCT_SLOTS" ? "5 product slots" :
+        type === "PRODUCT_BOOST" ? `${durationDays} day product boost` :
+        type === "VERIFIED_BADGE" ? "3-month verified badge" : "merchant ad campaign"}`,
+      description: type === "BUSINESS_AD"
+        ? `${impressionThousands} x 1,000 ad views for ${merchant.name}`
+        : `Floate merchant purchase for ${merchant.name}`,
+      redirectUrl: buildReturnUrl(siteUrl, merchant.slug, reference, "success"),
+      meta: {
+        floate_payment_reference: reference,
+        purchase_type: type,
+        merchant_phone: merchantPhone,
+        ...(productId ? { product_id: productId } : {}),
+        ...(durationDays ? { duration_days: String(durationDays) } : {}),
+        ...(impressionThousands ? { impression_thousands: String(impressionThousands) } : {})
+      }
     });
-    const checkoutId = String(checkout.checkout_id || checkout.data?.checkout_id || "");
-    const checkoutUrl = String(checkout.checkout_url || checkout.data?.checkout_url || "");
-    if (!checkoutId || !checkoutUrl) {
-      throw new Error("Bachs did not return a usable checkout session.");
+    let checkoutUrl: URL;
+    try {
+      checkoutUrl = new URL(checkout.paymentLink);
+    } catch {
+      throw new Error("Flutterwave did not return a usable checkout session.");
+    }
+    if (checkoutUrl.protocol !== "https:" ||
+        (checkoutUrl.hostname !== "flutterwave.com" && !checkoutUrl.hostname.endsWith(".flutterwave.com"))) {
+      throw new Error("Flutterwave did not return a valid hosted checkout link.");
     }
 
-    await updateDoc(paymentRef, { checkoutId, updatedAt: new Date().toISOString() });
-    return { success: true, reference, checkoutId, checkoutUrl, amountNaira, type };
+    await updateDoc(paymentRef, { updatedAt: new Date().toISOString() });
+    return { success: true, reference, checkoutUrl: checkoutUrl.toString(), amountNaira, type };
   } catch (error) {
     await updateDoc(paymentRef, { status: "FAILED", updatedAt: new Date().toISOString() });
     throw error;
@@ -227,6 +339,131 @@ function verifyWebhookSignature(rawBody: Buffer, headers: Record<string, string 
     if (!/^[a-f0-9]{64}$/i.test(signature)) return false;
     const provided = Buffer.from(signature, "hex");
     return provided.length === expected.length && timingSafeEqual(expected, provided);
+  });
+}
+
+async function fulfillStorefrontPayment(
+  paymentRef: DocumentReference,
+  payment: StorefrontPaymentRecord,
+  eventCollection: string,
+  eventId: string,
+  providerDetails: { checkoutId?: string; transactionId?: string } = {}
+) {
+  const eventRef = doc(db, eventCollection, eventId);
+  const merchantRef = doc(db, payment.merchantCollection, payment.merchantDocId);
+  const productRef = payment.productId ? doc(db, "products", payment.productId) : null;
+  const campaignRef = payment.type === "BUSINESS_AD"
+    ? doc(db, "ads", `ad_${payment.reference.toLowerCase()}`)
+    : null;
+  const now = new Date();
+  const nowIso = now.toISOString();
+
+  await runTransaction(db, async (transaction) => {
+    const [existingEvent, currentPayment, merchantSnapshot, productSnapshot] = await Promise.all([
+      transaction.get(eventRef),
+      transaction.get(paymentRef),
+      transaction.get(merchantRef),
+      productRef ? transaction.get(productRef) : Promise.resolve(null)
+    ]);
+
+    if (existingEvent.exists() || !currentPayment.exists()) return;
+    const currentData = currentPayment.data() as StorefrontPaymentRecord;
+    if (currentData.status === "SUCCEEDED") {
+      transaction.set(eventRef, { id: eventId, reference: payment.reference, processedAt: nowIso });
+      return;
+    }
+    if (currentData.status !== "PENDING" || !merchantSnapshot.exists()) {
+      throw new Error("Floate purchase is not eligible for fulfillment.");
+    }
+
+    if (currentData.type === "PRODUCT_SLOTS") {
+      transaction.update(merchantRef, {
+        paidProductSlots: Number(merchantSnapshot.data().paidProductSlots || 0) + PRODUCT_SLOT_COUNT,
+        updatedAt: nowIso
+      });
+    } else if (currentData.type === "PRODUCT_BOOST") {
+      if (!productRef || !productSnapshot?.exists()) {
+        throw new Error("The product paid for by this boost could not be found.");
+      }
+      const product = productSnapshot.data();
+      if (normalizePhone(product.vendorPhone || product.whatsapp || product.whatsappNumber || product.phone) !== currentData.merchantPhone) {
+        throw new Error("The product owner does not match the merchant who paid.");
+      }
+      const existingExpiry = Date.parse(String(product.boostedUntil || ""));
+      const boostStartsAt = Number.isFinite(existingExpiry) && existingExpiry > now.getTime()
+        ? existingExpiry
+        : now.getTime();
+      const boostExpiry = boostStartsAt + Number(currentData.durationDays) * DAY_MS;
+      if (boostExpiry > MAX_DATE_MS) {
+        throw new Error("The product boost duration exceeds the supported date range.");
+      }
+      const boostedUntil = new Date(boostExpiry).toISOString();
+      transaction.update(productRef, {
+        isBoosted: true,
+        boostedUntil,
+        boostPaymentReference: currentData.reference,
+        updatedAt: nowIso
+      });
+
+      const embeddedProducts = Array.isArray(merchantSnapshot.data().products)
+        ? merchantSnapshot.data().products
+        : [];
+      const updatedProducts = embeddedProducts.map((item: any) =>
+        String(item.id || "") === currentData.productId
+          ? { ...item, isBoosted: true, boostedUntil, boostPaymentReference: currentData.reference }
+          : item
+      );
+      if (embeddedProducts.some((item: any) => String(item.id || "") === currentData.productId)) {
+        transaction.update(merchantRef, { products: updatedProducts, updatedAt: nowIso });
+      }
+    } else if (currentData.type === "VERIFIED_BADGE") {
+      const merchantData = merchantSnapshot.data();
+      const existingExpiry = Date.parse(String(merchantData.paidVerificationBadgeExpiresAt || ""));
+      const expiryBase = Number.isFinite(existingExpiry) && existingExpiry > now.getTime()
+        ? new Date(existingExpiry)
+        : now;
+      expiryBase.setMonth(expiryBase.getMonth() + 3);
+      transaction.update(merchantRef, {
+        paidVerificationBadgeExpiresAt: expiryBase.toISOString(),
+        updatedAt: nowIso
+      });
+    } else if (currentData.type === "BUSINESS_AD") {
+      if (!campaignRef || !currentData.adDetails || !currentData.impressionThousands) {
+        throw new Error("The paid ad campaign details are incomplete.");
+      }
+      const views = currentData.impressionThousands * 1000;
+      transaction.set(campaignRef, {
+        id: campaignRef.id,
+        ...currentData.adDetails,
+        designedBannerUrl: currentData.adDetails.bannerUrl,
+        rawImageUrl: currentData.adDetails.bannerUrl,
+        adType: "HERO_BANNER",
+        displayMode: "MARQUEE",
+        displayIntervalSeconds: 60,
+        displayDurationSeconds: 8,
+        scrollDurationSeconds: 28,
+        status: "PENDING_REVIEW",
+        impressions: 0,
+        clicks: 0,
+        purchasedViews: views,
+        budget: currentData.amountNaira,
+        amountPaid: currentData.amountNaira,
+        paymentReference: currentData.reference,
+        merchantPhone: currentData.merchantPhone,
+        submittedVia: "MERCHANT_PAID",
+        createdAt: nowIso,
+        updatedAt: nowIso
+      });
+    }
+
+    transaction.update(paymentRef, {
+      status: "SUCCEEDED",
+      paidAt: nowIso,
+      ...(providerDetails.checkoutId ? { checkoutId: providerDetails.checkoutId } : {}),
+      ...(providerDetails.transactionId ? { transactionId: providerDetails.transactionId } : {}),
+      updatedAt: nowIso
+    });
+    transaction.set(eventRef, { id: eventId, reference: currentData.reference, processedAt: nowIso });
   });
 }
 
@@ -276,91 +513,74 @@ export async function processBachsWebhook(rawBody: Buffer, headers: Record<strin
     throw new Error("Bachs checkout amount or currency does not match the pending Floate purchase.");
   }
 
-  const eventRef = doc(db, WEBHOOK_EVENT_COLLECTION, eventId);
-  const merchantRef = doc(db, payment.merchantCollection, payment.merchantDocId);
-  const productRef = payment.productId ? doc(db, "products", payment.productId) : null;
-  const now = new Date();
+  await fulfillStorefrontPayment(paymentRef, payment, WEBHOOK_EVENT_COLLECTION, eventId, { checkoutId });
 
-  await runTransaction(db, async (transaction) => {
-    const [existingEvent, currentPayment, merchantSnapshot, productSnapshot] = await Promise.all([
-      transaction.get(eventRef),
-      transaction.get(paymentRef),
-      transaction.get(merchantRef),
-      productRef ? transaction.get(productRef) : Promise.resolve(null)
-    ]);
+  return { received: true, processed: true };
+}
 
-    if (existingEvent.exists() || !currentPayment.exists()) return;
-    const currentData = currentPayment.data() as StorefrontPaymentRecord;
-    if (currentData.status === "SUCCEEDED") {
-      transaction.set(eventRef, { id: eventId, reference, processedAt: now.toISOString() });
-      return;
+export async function processFlutterwaveStorefrontPayment(input: {
+  reference: string;
+  transactionId?: string;
+}) {
+  const reference = input.reference.trim();
+  if (!reference) throw new Error("Flutterwave payment reference is required.");
+  const paymentRef = doc(db, PAYMENT_COLLECTION, reference);
+  const snapshot = await getDoc(paymentRef);
+  if (!snapshot.exists()) return { received: true, processed: false };
+  const payment = snapshot.data() as StorefrontPaymentRecord;
+  if (payment.status === "SUCCEEDED") return { received: true, processed: true };
+  if (payment.status !== "PENDING") return { received: true, processed: false };
+
+  const verification = input.transactionId
+    ? await flutterwaveService.verifyTransaction(input.transactionId)
+    : await flutterwaveService.verifyTransactionByRef(reference);
+  const data = verification.data;
+  if (data && String(data.tx_ref || "") === reference &&
+      ["failed", "cancelled", "canceled"].includes(String(data.status || "").toLowerCase())) {
+    await updateDoc(paymentRef, { status: "FAILED", updatedAt: new Date().toISOString() });
+    return { received: true, processed: false };
+  }
+  if (!verification.success || !data) {
+    if (input.transactionId) {
+      throw new Error(verification.error || "Flutterwave has not confirmed this payment.");
     }
-    if (currentData.status !== "PENDING" || !merchantSnapshot.exists()) {
-      throw new Error("Floate purchase is not eligible for fulfillment.");
-    }
-
-    if (currentData.type === "PRODUCT_SLOTS") {
-      const merchantData = merchantSnapshot.data();
-      const purchasedSlots = Number(merchantData.paidProductSlots || 0);
-      transaction.update(merchantRef, {
-        paidProductSlots: purchasedSlots + PRODUCT_SLOT_COUNT,
-        updatedAt: now.toISOString()
-      });
-    } else {
-      if (!productRef || !productSnapshot?.exists()) {
-        throw new Error("The product paid for by this boost could not be found.");
-      }
-      const product = productSnapshot.data();
-      if (normalizePhone(product.vendorPhone || product.whatsapp || product.whatsappNumber || product.phone) !== payment.merchantPhone) {
-        throw new Error("The product owner does not match the merchant who paid.");
-      }
-      const existingExpiry = Date.parse(String(product.boostedUntil || ""));
-      const boostStartsAt = Number.isFinite(existingExpiry) && existingExpiry > now.getTime()
-        ? existingExpiry
-        : now.getTime();
-      const boostedUntil = new Date(boostStartsAt + Number(payment.durationDays) * 24 * 60 * 60 * 1000).toISOString();
-      transaction.update(productRef, {
-        isBoosted: true,
-        boostedUntil,
-        boostPaymentReference: reference,
-        updatedAt: now.toISOString()
-      });
-
-      const embeddedProducts = Array.isArray(merchantSnapshot.data().products)
-        ? merchantSnapshot.data().products
-        : [];
-      const updatedProducts = embeddedProducts.map((item: any) =>
-        String(item.id || "") === payment.productId
-          ? { ...item, isBoosted: true, boostedUntil, boostPaymentReference: reference }
-          : item
-      );
-      if (embeddedProducts.some((item: any) => String(item.id || "") === payment.productId)) {
-        transaction.update(merchantRef, { products: updatedProducts, updatedAt: now.toISOString() });
-      }
-    }
-
-    transaction.update(paymentRef, {
-      status: "SUCCEEDED",
-      paidAt: now.toISOString(),
-      checkoutId,
-      updatedAt: now.toISOString()
-    });
-    transaction.set(eventRef, { id: eventId, reference, processedAt: now.toISOString() });
-  });
-
+    console.info(`[Flutterwave] Payment ${reference} is not confirmed yet: ${verification.error || "pending"}`);
+    return { received: true, processed: false };
+  }
+  if (String(data.tx_ref || "") !== reference ||
+      String(data.currency || "").toUpperCase() !== "NGN" ||
+      Number(data.amount) !== payment.amountNaira) {
+    await updateDoc(paymentRef, { status: "REVIEW", updatedAt: new Date().toISOString() });
+    throw new Error("Flutterwave payment details do not match the pending Floate purchase.");
+  }
+  const transactionId = String(data.id || input.transactionId || "");
+  const eventId = transactionId || reference;
+  await fulfillStorefrontPayment(
+    paymentRef,
+    payment,
+    FLUTTERWAVE_EVENT_COLLECTION,
+    eventId,
+    { transactionId }
+  );
   return { received: true, processed: true };
 }
 
 export async function getStorefrontPaymentStatus(reference: string, authenticatedPhones: string[]) {
   const snapshot = await getDoc(doc(db, PAYMENT_COLLECTION, reference));
   if (!snapshot.exists()) return null;
-  const payment = snapshot.data() as StorefrontPaymentRecord;
+  let payment = snapshot.data() as StorefrontPaymentRecord;
   if (!authenticatedPhones.includes(payment.merchantPhone)) return null;
+  if (payment.status === "PENDING") {
+    await processFlutterwaveStorefrontPayment({ reference });
+    const refreshed = await getDoc(doc(db, PAYMENT_COLLECTION, reference));
+    if (refreshed.exists()) payment = refreshed.data() as StorefrontPaymentRecord;
+  }
   return {
     reference: payment.reference,
     status: payment.status,
     type: payment.type,
     amountNaira: payment.amountNaira,
-    durationDays: payment.durationDays
+    durationDays: payment.durationDays,
+    impressionThousands: payment.impressionThousands
   };
 }

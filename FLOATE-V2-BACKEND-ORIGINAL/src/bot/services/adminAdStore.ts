@@ -158,12 +158,25 @@ export async function deleteAd(id: string): Promise<void> {
 
 export async function recordAdEvent(id: string, event: "view" | "click"): Promise<boolean> {
   const ad = adsCollection().doc(id);
-  const existing = await ad.get();
-  if (!existing.exists) return false;
-  await ad.update({
-    [event === "view" ? "impressions" : "clicks"]: FieldValue.increment(1),
+  return ad.firestore.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ad);
+    if (!snapshot.exists || snapshot.data()?.status !== "ACTIVE") return false;
+
+    const data = snapshot.data() || {};
+    const impressions = Number(data.impressions || 0);
+    const purchasedViews = Number(data.purchasedViews || 0);
+    if (event === "view" && purchasedViews > 0 && impressions >= purchasedViews) {
+      transaction.update(ad, { status: "EXPIRED", updatedAt: new Date().toISOString() });
+      return false;
+    }
+
+    const reachesViewLimit = event === "view" && purchasedViews > 0 && impressions + 1 >= purchasedViews;
+    transaction.update(ad, {
+      [event === "view" ? "impressions" : "clicks"]: FieldValue.increment(1),
+      ...(reachesViewLimit ? { status: "EXPIRED", updatedAt: new Date().toISOString() } : {}),
+    });
+    return true;
   });
-  return true;
 }
 
 export async function saveBoostRequest(request: Record<string, unknown> & { txRef: string }): Promise<void> {
@@ -182,6 +195,6 @@ export async function listBoostRequests(): Promise<Record<string, unknown>[]> {
     .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
 }
 
-export async function uploadAdImage(buffer: Buffer): Promise<string> {
-  return uploadImageToCloudinary(buffer, { folder: "floate/admin-ads", mimeType: "image/jpeg" });
+export async function uploadAdImage(buffer: Buffer, folder = "floate/admin-ads"): Promise<string> {
+  return uploadImageToCloudinary(buffer, { folder, mimeType: "image/jpeg" });
 }

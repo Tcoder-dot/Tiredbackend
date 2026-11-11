@@ -58,7 +58,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
     th, td { padding: 10px 8px; text-align: left; border-top: 1px solid #e6ece6; white-space: nowrap; }
     th { color: #607066; font-size: 11px; text-transform: uppercase; }
     .badge { display: inline-block; font-size: 11px; font-weight: 800; border-radius: 99px; padding: 3px 8px; background: #e7f5e9; color: #17662a; }
-    .badge.PAUSED, .badge.DRAFT, .badge.PENDING_DESIGN { background: #fff3d6; color: #855b00; }
+    .badge.PAUSED, .badge.DRAFT, .badge.PENDING_REVIEW, .badge.PENDING_DESIGN { background: #fff3d6; color: #855b00; }
     .badge.EXPIRED { background: #f0f0f0; color: #555; }
     [hidden] { display: none !important; }
     @media (max-width: 620px) { .grid, .stat-grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } .campaign { grid-template-columns: 88px 1fr; gap: 10px; } .campaign img { width: 88px; } .image-preview { width: min(100%, 300px); } }
@@ -100,7 +100,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
             <label>Target cities<input name="targetCities" placeholder="Lagos, Onitsha, Aba"></label>
             <label>Target categories<input name="targetCategories" placeholder="Phones, Fashion"></label>
             <label class="wide">Keywords<input name="keywords" placeholder="phones, gadgets, offers"></label>
-            <label>Status<select name="status"><option value="ACTIVE">ACTIVE — live</option><option value="PAUSED">PAUSED</option><option value="DRAFT">DRAFT</option><option value="EXPIRED">EXPIRED</option></select></label>
+            <label>Status<select name="status"><option value="PENDING_REVIEW">PENDING REVIEW</option><option value="ACTIVE">ACTIVE — approved / live</option><option value="PAUSED">PAUSED</option><option value="DRAFT">DRAFT</option><option value="EXPIRED">EXPIRED</option></select></label>
           </div>
           <p id="form-status" class="status" role="status"></p>
           <div class="actions">
@@ -236,8 +236,18 @@ export const adminAdsDashboardHtml = `<!doctype html>
           merchant.textContent = (campaign.merchantName || "Floate Partner") + " · " + (campaign.adType || "Sponsored") + " · " + displayMode;
           const description = document.createElement("p");
           description.textContent = campaign.description || "";
+          const targeting = document.createElement("p");
+          targeting.textContent = [
+            campaign.targetUrl ? "Destination: " + campaign.targetUrl : "",
+            campaign.targetCities?.length ? "Cities: " + campaign.targetCities.join(", ") : "",
+            campaign.targetCategories?.length ? "Categories: " + campaign.targetCategories.join(", ") : ""
+          ].filter(Boolean).join(" · ");
           const stats = document.createElement("p");
-          stats.textContent = "Views: " + Number(campaign.impressions || 0) + " · Clicks: " + Number(campaign.clicks || 0);
+          stats.textContent = "Views: " + Number(campaign.impressions || 0) +
+            (campaign.purchasedViews ? " / " + Number(campaign.purchasedViews) + " purchased" : "") +
+            " · Clicks: " + Number(campaign.clicks || 0);
+          const payment = document.createElement("p");
+          payment.textContent = campaign.paymentReference ? "Payment ref: " + campaign.paymentReference : "";
           const metrics = document.createElement("div");
           metrics.className = "campaign-metrics";
           metrics.hidden = true;
@@ -275,7 +285,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
           remove.textContent = "Delete";
           remove.addEventListener("click", () => deleteCampaign(campaign));
           actions.append(edit, remove);
-          content.append(heading, badge, merchant, description, stats, metrics, actions);
+          content.append(heading, badge, merchant, description, targeting, stats, payment, metrics, actions);
           row.append(content);
           list.append(row);
         }

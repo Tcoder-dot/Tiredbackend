@@ -8,7 +8,8 @@ import { createServer as createViteServer } from "vite";
 import {
   createStorefrontCheckout,
   getStorefrontPaymentStatus,
-  processBachsWebhook
+  processBachsWebhook,
+  processFlutterwaveStorefrontPayment
 } from "./src/bot/services/storefrontPaymentService.js";
 import { generateSitemapXML, generateRobotsTxt } from "./src/utils/sitemap";
 import searchRouter from "./routes/search";
@@ -39,6 +40,7 @@ import { sessionCookieMiddleware } from "./src/middleware/auth.js";
 import { whatsappAuthService } from "./src/bot/services/whatsappAuthService.js";
 import { renderCredentialPng, resolveCredential } from "./src/bot/services/credentialAssetRenderer.js";
 import { createCredentialForMerchant } from "./src/bot/services/credentialService.js";
+import { flutterwaveService } from "./src/bot/services/flutterwaveService.js";
 import { SEO_HUBS_DATA } from "./src/data/seoHubs";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch, runTransaction } from "firebase/firestore";
@@ -92,6 +94,30 @@ app.post(
 );
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ limit: '15mb', extended: true }));
+app.post("/api/webhooks/flutterwave", async (req, res) => {
+  const signature = req.get("verif-hash");
+  if (!flutterwaveService.verifyWebhookSecret(signature)) {
+    return res.status(401).send("Invalid Flutterwave webhook signature.");
+  }
+
+  const payload = req.body || {};
+  const data = payload.data || {};
+  if (String(payload.event || "").toLowerCase() !== "charge.completed" ||
+      String(data.status || "").toLowerCase() !== "successful") {
+    return res.status(200).json({ received: true, processed: false });
+  }
+
+  try {
+    const result = await processFlutterwaveStorefrontPayment({
+      reference: String(data.tx_ref || ""),
+      transactionId: String(data.id || "")
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("[Flutterwave Storefront Webhook] Could not verify payment:", error);
+    return res.status(503).send("Payment could not be verified yet.");
+  }
+});
 app.get(["/whatsapp-webhook", "/api/whatsapp-webhook"], handleWhatsAppVerification);
 app.post(["/whatsapp-webhook", "/api/whatsapp-webhook"], handleWhatsAppWebhook);
 
@@ -157,7 +183,7 @@ const parseAdminAdPayload = (value: unknown) => {
   const designedBannerUrl = String(payload.designedBannerUrl || payload.rawImageUrl || "").trim().slice(0, 2048);
   const targetUrl = String(payload.targetUrl || "").trim().slice(0, 2048);
   const status = String(payload.status || "ACTIVE").trim().toUpperCase();
-  const allowedStatuses = new Set(["ACTIVE", "PAUSED", "DRAFT", "PENDING_DESIGN", "EXPIRED"]);
+  const allowedStatuses = new Set(["ACTIVE", "PAUSED", "DRAFT", "PENDING_REVIEW", "PENDING_DESIGN", "EXPIRED"]);
   const parseTiming = (raw: unknown, fallback: number, min: number, max: number, label: string) => {
     const value = raw === undefined || raw === null || raw === "" ? fallback : Number(raw);
     if (!Number.isInteger(value) || value < min || value > max) {
@@ -202,7 +228,7 @@ const parseAdminAdPayload = (value: unknown) => {
     keywords,
     targetCategory: targetCategories[0] || "",
     targetLocation: targetCities[0] || "",
-    status: status as "ACTIVE" | "PAUSED" | "DRAFT" | "PENDING_DESIGN" | "EXPIRED",
+    status: status as "ACTIVE" | "PAUSED" | "DRAFT" | "PENDING_REVIEW" | "PENDING_DESIGN" | "EXPIRED",
   };
 };
 
@@ -426,6 +452,47 @@ app.post(
       }
       console.error("[Ads Admin] Failed to upload banner image:", error);
       return res.status(503).json({ success: false, error: error.message || "Banner image storage is unavailable." });
+    }
+  }
+);
+
+app.post(
+  "/api/merchant/ads/image",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  express.raw({ type: () => true, limit: "8mb" }),
+  async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to upload an ad banner." });
+    }
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ success: false, error: "Select an ad banner image to upload." });
+    }
+
+    const mimeType = String(req.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const signatures: Record<string, (buffer: Buffer) => boolean> = {
+      "image/jpeg": (buffer) => buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff,
+      "image/png": (buffer) => buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+      "image/webp": (buffer) => buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP",
+    };
+    if (!signatures[mimeType] || !signatures[mimeType](req.body)) {
+      return res.status(400).json({ success: false, error: "Upload a valid JPG, PNG, or WebP image." });
+    }
+
+    try {
+      const normalizedImage = await sharp(req.body)
+        .rotate()
+        .resize(1200, 400, { fit: "cover", position: "centre" })
+        .jpeg({ quality: 88, mozjpeg: true })
+        .toBuffer();
+      const imageUrl = await uploadAdImage(normalizedImage, "floate/merchant-ads");
+      return res.status(201).json({ success: true, imageUrl, width: 1200, height: 400 });
+    } catch (error: any) {
+      if (error?.type === "entity.too.large") {
+        return res.status(413).json({ success: false, error: "Image must be 8 MB or smaller." });
+      }
+      console.error("[Merchant Ads] Failed to upload banner image:", error);
+      return res.status(503).json({ success: false, error: "Banner image storage is unavailable." });
     }
   }
 );
@@ -1706,7 +1773,7 @@ app.get("/api/catalog/vendor/:phone", async (req, res) => {
 });
 
 app.post(
-  "/api/payments/bachs/checkout",
+  ["/api/payments/flutterwave/checkout", "/api/payments/bachs/checkout"],
   sessionCookieMiddleware,
   whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
   async (req, res) => {
@@ -1727,13 +1794,15 @@ app.post(
         merchantPhone: requestedPhone,
         type: req.body?.type,
         productId: req.body?.productId,
-        durationDays: req.body?.durationDays
+        durationDays: req.body?.durationDays,
+        impressionThousands: req.body?.impressionThousands,
+        adDetails: req.body?.adDetails
       });
       return res.status(201).json(checkout);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Checkout could not be created.";
-      console.error("[Bachs] Failed to create merchant checkout:", message);
-      const status = message.startsWith("Bachs") ? 503 :
+      console.error("[Flutterwave] Failed to create merchant checkout:", message);
+      const status = message.startsWith("Flutterwave") ? 503 :
         message.includes("only boost") ? 403 :
         message.includes("not found") ? 404 : 400;
       return res.status(status).json({ success: false, error: message });
@@ -1742,7 +1811,7 @@ app.post(
 );
 
 app.get(
-  "/api/payments/bachs/status/:reference",
+  ["/api/payments/flutterwave/status/:reference", "/api/payments/bachs/status/:reference"],
   sessionCookieMiddleware,
   whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
   async (req, res) => {
@@ -5349,6 +5418,9 @@ let liveMerchantsCache: any[] = [];
 let liveMerchantsCacheTime = 0;
 
 function getMerchantVerificationStatus(merchant: any): string {
+  const paidBadgeExpiresAt = Date.parse(String(merchant?.paidVerificationBadgeExpiresAt || ""));
+  if (Number.isFinite(paidBadgeExpiresAt) && paidBadgeExpiresAt > Date.now()) return "APPROVED";
+
   const status = String(merchant?.verificationStatus || merchant?.verification_status || '').toUpperCase();
   if (['APPROVED', 'VERIFIED', 'PENDING_REVIEW', 'UNDER_REVIEW', 'PENDING', 'REJECTED'].includes(status)) {
     return status === 'PENDING' || status === 'UNDER_REVIEW' ? 'PENDING_REVIEW' : status;
