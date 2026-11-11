@@ -4328,14 +4328,7 @@ async function sendSingleMessageRegistrationPrompt(toPhone: string, senderName: 
 async function sendFloateTaskClarification(toPhone: string): Promise<void> {
   await sendWhatsAppMessage(
     toPhone,
-    `I can help with Floate shopping searches, merchant tools, market hubs, and Floate FAQs. What would you like to do?`,
-    {
-      quickReplies: [
-        { id: 'btn_find_product', title: 'Find a product' },
-        { id: 'btn_for_businesses', title: 'Merchant tools' },
-        { id: 'btn_browse_markets', title: 'Browse markets' },
-      ],
-    }
+    `Tell me what you need in your own words—an item to buy or a service to hire—and I’ll look for matching Floate listings. For example, “a black T-shirt,” “a make-up kit,” or “a professional website.”`
   );
 }
 
@@ -5817,9 +5810,9 @@ export async function processMasterWhatsAppEngine(params: {
     const isRegister =
       isBusinessRegistrationPhrase(text) ||
       isBusinessRegistrationPhrase(cleanLower) ||
-      /^(register|sell|vendor|business|merchant|add shop|open shop|list|2|role_business)$/i.test(cleanLower) ||
-      /\b(register|sell|vendor|business|merchant|store|shop)\b/i.test(cleanLower);
+      /^(register|sell|vendor|business|merchant|add shop|open shop|list|2|role_business)$/i.test(cleanLower);
     const isShopping = /^(shop|shopping|buy|buyer|looking for|find|search|items|products|1|role_buyer)$/i.test(cleanLower);
+    const initialIntent = isShopping ? null : await classifyInboundIntent(text);
 
     if (isRegister) {
       const hints = extractRegistrationHints(text);
@@ -5827,11 +5820,20 @@ export async function processMasterWhatsAppEngine(params: {
       return;
     }
 
+    if (initialIntent?.intent === 'BUYER_SEARCH') {
+      await execute10CardSearch(cleanPhone, senderName, {
+        queryText: text,
+        location: initialIntent.extractedLocation || undefined,
+        parsedQuery: initialIntent.extractedQuery,
+      });
+      return;
+    }
+
     // Default to Buyer route
     updateWhatsAppSession(cleanPhone, { state: 'AWAITING_PRIMARY_LOCATION' });
     await sendWhatsAppMessage(
       cleanPhone,
-      "What city or area are you usually shopping from?"
+      "What city or area would you like me to search in?"
     );
     return;
   }
@@ -7305,7 +7307,18 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
   // 1. Query override (e.g. "shoes in onitsha") takes highest precedence for this search
   // 2. Otherwise default to buyer's saved primaryLocation for proximity prioritization
   const buyer = await firestoreDb.getOrCreateBuyerAccount(toPhone, 'whatsapp', senderName);
-  const targetLoc = location || parsed.targetSellerLocation || buyer.primaryLocation || 'Nigeria';
+  const targetLoc = location || parsed.targetSellerLocation || parsed.buyerLocation || buyer.primaryLocation;
+  if (!targetLoc) {
+    updateWhatsAppSession(toPhone, {
+      state: 'AWAITING_PRIMARY_LOCATION',
+      pendingInitialText: queryText,
+    });
+    await sendWhatsAppMessage(
+      toPhone,
+      `Got it — you’re looking for *${cleanProduct}*. Which city or market should I search for vendors in?`
+    );
+    return;
+  }
 
   const catalogProducts = await firestoreDb.getAllProducts();
   const matchedProducts = matchCatalogProducts(catalogProducts, cleanProduct, targetLoc, 10, {
@@ -7341,7 +7354,7 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
     });
     await sendWhatsAppMessage(
       toPhone,
-      `🛍️ *Matching listed products for "${cleanProduct}":*\n\n${productLines.join('\n\n')}\n\n` +
+      `🛍️ *Matching listed ${parsed.itemType === 'service' ? 'services' : 'products'} for "${cleanProduct}":*\n\n${productLines.join('\n\n')}\n\n` +
         `Open a product page to view its details and contact the seller.`,
       {
         quickReplies: [
@@ -7463,8 +7476,9 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
   const top5 = displayedListings.slice(0, 5);
 
   let listMsg = '';
+  const requestedItemLabel = parsed.itemType === 'service' ? 'services like' : 'products like';
   if (hasLocalVendors) {
-    listMsg = `*Relevant vendors who sell products like "${cleanProduct}" in ${targetLoc}:*\n`;
+    listMsg = `*Relevant vendors offering ${requestedItemLabel} "${cleanProduct}" in ${targetLoc}:*\n`;
   } else {
     listMsg = `📍 *No verified local sellers found directly in ${targetLoc} for "${cleanProduct}".*\n\n` +
       `Here are verified merchants from top market hubs that deliver to *${targetLoc}* via waybill / doorstep:\n`;

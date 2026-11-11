@@ -14,6 +14,9 @@ const TERM_GROUPS = [
   ['slipper', 'slippers', 'sandal', 'sandals', 'slides', 'slide'],
   ['wig', 'wigs', 'hairpiece', 'hairpieces'],
   ['dress', 'dresses', 'gown', 'gowns'],
+  ['shirt', 'shirts', 'tshirt', 'tshirts', 'tee', 'tees'],
+  ['jean', 'jeans', 'denim'],
+  ['trouser', 'trousers', 'pant', 'pants'],
 ];
 
 function normalizeText(value: unknown): string {
@@ -21,6 +24,9 @@ function normalizeText(value: unknown): string {
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
+    .replace(/\bmake[\s-]+up\b/g, 'makeup')
+    .replace(/\bt[\s-]+shirts?\b/g, 'tshirt')
+    .replace(/\btee\s+shirts?\b/g, 'tshirt')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 }
@@ -109,11 +115,11 @@ export function matchCatalogProducts(
   options: CatalogSearchOptions = {},
 ): CatalogSearchProduct[] {
   const terms = queryTerms(query);
-  const inferredTerms = queryTerms([
-    options.category || '',
-    ...(options.inferredCategories || []),
-  ].join(' '));
-  if (!terms.length && !inferredTerms.length) return [];
+  const itemAnchors = terms.filter((term) => TERM_GROUPS.some((group) => group.includes(term)));
+  const inferredCategories = [options.category || '', ...(options.inferredCategories || [])]
+    .map(normalizeText)
+    .filter(Boolean);
+  if (!terms.length && !inferredCategories.length) return [];
   const specificTerms = terms.filter((term) => /\d/.test(term));
 
   const normalizedLocation = normalizeText(location);
@@ -135,16 +141,19 @@ export function matchCatalogProducts(
     const matchedTitleTerms = terms.filter((term) => termMatches(term, titleTerms));
     const matchedDetailTerms = terms.filter((term) => termMatches(term, detailTerms));
     const matchedCategoryTerms = terms.filter((term) => termMatches(term, categoryTerms));
-    const matchedInferredTerms = inferredTerms.filter((term) =>
-      termMatches(term, titleTerms) || termMatches(term, detailTerms) || termMatches(term, categoryTerms)
+    const matchedInferredCategories = inferredCategories.filter((phrase) =>
+      titleText.includes(phrase) || detailText.includes(phrase) || categoryText.includes(phrase)
     );
 
+    if (itemAnchors.length && !itemAnchors.some((term) =>
+      termMatches(term, titleTerms) || termMatches(term, detailTerms)
+    )) return [];
     if (specificTerms.some((term) => !termMatches(term, titleTerms) && !termMatches(term, detailTerms))) return [];
     if (
       !matchedTitleTerms.length &&
       !matchedDetailTerms.length &&
       !matchedCategoryTerms.length &&
-      !(options.itemType === 'service' && matchedInferredTerms.length)
+      !(options.itemType === 'service' && matchedInferredCategories.length)
     ) return [];
 
     const serviceProduct = isServiceProduct(rawProduct, productName);
@@ -163,7 +172,7 @@ export function matchCatalogProducts(
       matchedTitleTerms.length * 120 +
       matchedDetailTerms.length * 30 +
       matchedCategoryTerms.length * 65 +
-      matchedInferredTerms.length * 45 +
+      matchedInferredCategories.length * 45 +
       (locationMatch ? 50 : 0) +
       (options.maxPriceNaira && listedPrice !== null ? 20 : 0) +
       (options.itemType && serviceProduct === (options.itemType === 'service') ? 10 : 0);

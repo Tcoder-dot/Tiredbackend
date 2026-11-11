@@ -2431,24 +2431,50 @@ app.get("/sitemap.xml", async (_req, res) => {
       fetchLiveRegisteredMerchants(),
       getAllProducts()
     ]);
-    const merchantSlugs = merchants
+    const indexableMerchants = merchants
+      .filter((merchant: any) =>
+        isMerchantVerificationApproved(merchant) &&
+        Boolean(String(merchant.businessName || merchant.name || "").trim()) &&
+        Boolean(normalizeWhatsAppNumber(merchant.whatsappNumber || merchant.whatsapp || merchant.phone))
+      );
+    const merchantSlugs = indexableMerchants
       .filter((merchant: any) =>
         Boolean(String(merchant.businessName || merchant.name || "").trim()) &&
         normalizeWhatsAppNumber(merchant.whatsappNumber || merchant.whatsapp || merchant.phone)
       )
       .map((merchant: any) => createMerchantSlug(merchant.businessName || merchant.name || ""))
       .filter(Boolean);
-    const productIds = products
-      .filter((product: any) =>
-        product &&
-        (product.title || product.name) &&
-        Number(product.price_naira) > 0
-      )
-      .map((product: any) => String(product.id || "").trim())
-      .filter(Boolean);
+    const approvedByPhone = new Map<string, any>();
+    const approvedBySlug = new Map<string, any>();
+    for (const merchant of indexableMerchants) {
+      const phone = normalizeWhatsAppNumber(merchant.whatsappNumber || merchant.whatsapp || merchant.phone);
+      const slug = createMerchantSlug(merchant.businessName || merchant.name || "");
+      if (phone) approvedByPhone.set(phone, merchant);
+      if (slug) approvedBySlug.set(slug, merchant);
+    }
+    const sitemapProducts = products.flatMap((product: any) => {
+      if (!product || !(product.title || product.name) ||
+        Number(product.price_naira ?? product.numericPrice ?? product.price) <= 0) return [];
+
+      const vendor = product.vendor || product.merchant || {};
+      const phone = normalizeWhatsAppNumber(
+        product.vendorPhone || product.whatsappNumber || product.whatsapp || vendor.whatsapp_number || vendor.whatsappNumber
+      );
+      const slug = String(product.merchantSlug || product.vendorSlug || product.vendor_slug || vendor.slug || "").toLowerCase();
+      const sellerName = String(product.businessName || product.vendorName || product.seller || vendor.name || "").trim().toLowerCase();
+      const merchant = approvedByPhone.get(phone) || approvedBySlug.get(slug) ||
+        (sellerName && indexableMerchants.find((candidate: any) =>
+          String(candidate.businessName || candidate.name || "").trim().toLowerCase() === sellerName
+        ));
+      const id = String(product.id || "").trim();
+      const merchantSlug = merchant
+        ? createMerchantSlug(merchant.businessName || merchant.name || "")
+        : "";
+      return id && merchantSlug ? [{ id, merchantSlug }] : [];
+    });
 
     res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
-    return res.type("application/xml").send(generateSitemapXML(merchantSlugs, productIds));
+    return res.type("application/xml").send(generateSitemapXML(merchantSlugs, sitemapProducts));
   } catch (error) {
     console.error("[SEO] Sitemap generation failed:", error);
     return res.status(500).type("text/plain").send("Unable to generate sitemap");
@@ -4950,6 +4976,21 @@ function isHttpUrl(value: unknown): value is string {
   }
 }
 
+function getMerchantGeo(merchant: any): { "@type": "GeoCoordinates"; latitude: number; longitude: number } | null {
+  const coordinates = merchant?.coordinates && typeof merchant.coordinates === "object"
+    ? merchant.coordinates
+    : {};
+  const latitude = Number(coordinates.latitude ?? coordinates.lat);
+  const longitude = Number(coordinates.longitude ?? coordinates.lng);
+  if (
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude) ||
+    latitude < -90 || latitude > 90 ||
+    longitude < -180 || longitude > 180
+  ) return null;
+  return { "@type": "GeoCoordinates", latitude, longitude };
+}
+
 function renderSeoHead(seo: PageSeo): string {
   const image = isHttpUrl(seo.image) ? seo.image : SEO_DEFAULT_IMAGE;
   const title = escapeHtml(seo.title);
@@ -5056,6 +5097,7 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
     const image = isHttpUrl(merchant.avatarUrl || merchant.avatar_url)
       ? String(merchant.avatarUrl || merchant.avatar_url)
       : undefined;
+    const geo = getMerchantGeo(merchant);
     const schema = {
       "@context": "https://schema.org",
       "@type": "Store",
@@ -5064,6 +5106,7 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
       url: canonical,
       ...(image ? { image } : {}),
       ...(phone ? { telephone: `+${phone}` } : {}),
+      ...(geo ? { geo } : {}),
       description,
       address: {
         "@type": "PostalAddress",
@@ -5083,7 +5126,7 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
         const productId = String(product.id || "");
         const productPrice = Number(product.price_naira ?? product.price);
         const link = productId
-          ? `<a href="/p/${encodeURIComponent(productId)}">${escapeHtml(productName)}</a>`
+          ? `<a href="/p/${encodeURIComponent(canonicalSlug)}/${encodeURIComponent(productId)}">${escapeHtml(productName)}</a>`
           : escapeHtml(productName);
         const priceText = Number.isFinite(productPrice) && productPrice > 0
           ? ` — ₦${productPrice.toLocaleString("en-NG")}`
@@ -5100,7 +5143,7 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
         canonical,
         image,
         type: "profile",
-        robots: indexRobots,
+        robots: isMerchantVerificationApproved(merchant) ? indexRobots : "noindex, nofollow",
         schema,
         body: `<main><h1>${escapeHtml(name)} in ${escapeHtml(city)}</h1><p>${escapeHtml(description)}</p><p>${escapeHtml(location)}</p>${listingHtml ? `<h2>Current listings</h2><ul>${listingHtml}</ul>` : ""}</main>`
       }
@@ -5136,6 +5179,19 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
     const description = String(product.description ||
       `${title} from ${merchantName} in ${location}. Contact the seller directly through FLOATE.`).trim().slice(0, 300);
     const merchantSlug = createMerchantSlug(merchantName) || String(vendor.slug || "");
+    let sellerMerchant = {
+      ...vendor,
+      verificationStatus: vendor.verificationStatus || product.verificationStatus || product.verification_status,
+      isVerified: vendor.isVerified ?? product.isVerified,
+      verified: vendor.verified ?? product.verified
+    };
+    if (!isMerchantVerificationApproved(sellerMerchant) && merchantSlug) {
+      const sellerResult = await fetchLocalJson(`/api/storefront/merchants/${encodeURIComponent(merchantSlug)}`);
+      if (sellerResult.data?.success && sellerResult.data.merchant) {
+        sellerMerchant = sellerResult.data.merchant;
+      }
+    }
+    const sellerGeo = getMerchantGeo(sellerMerchant);
     const canonical = merchantSlug
       ? `https://www.floate.xyz/p/${encodeURIComponent(merchantSlug)}/${encodeURIComponent(id)}`
       : `https://www.floate.xyz/p/${encodeURIComponent(id)}`;
@@ -5172,7 +5228,8 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
                     addressCountry: "NG"
                   }
                 }
-              : {})
+              : {}),
+            ...(sellerGeo ? { geo: sellerGeo } : {})
           }
         }
       : undefined;
@@ -5197,7 +5254,7 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
         canonical,
         image,
         type: "product",
-        robots: indexRobots,
+        robots: isMerchantVerificationApproved(sellerMerchant) ? indexRobots : "noindex, nofollow",
         schema,
         body: `<main><h1>${escapeHtml(title)}</h1>${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(title)}">` : ""}<p>${escapeHtml(description)}</p>${Number.isFinite(price) && price > 0 ? `<p>Price: ₦${escapeHtml(price.toLocaleString("en-NG"))}</p>` : ""}<p>Seller: <a href="/vendor/${encodeURIComponent(createMerchantSlug(merchantName) || vendor.slug || "")}">${escapeHtml(merchantName)}</a>${location ? ` in ${escapeHtml(location)}` : ""}</p></main>`
       }

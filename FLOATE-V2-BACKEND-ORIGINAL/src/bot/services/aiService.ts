@@ -1,6 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { config } from '../config.js';
 import { withExternalTimeout } from './timeoutService.js';
+import { parseSearchQuery } from '../../lib/searchCategoryMatcher.js';
 
 let aiInstance: GoogleGenAI | null = null;
 
@@ -305,18 +306,26 @@ function looksLikeBuyerSearchIntent(rawInput: string): boolean {
   if (!text) return false;
 
   const lower = text.toLowerCase();
-  const shoppingSignals = /\b(?:i\s+(?:want|need|am\s+looking\s+for|need|am\s+trying\s+to\s+buy)|looking\s+for|search(?:ing)?\s+for|find\s+(?:me\s+)?|buy\s+(?:me\s+)?|order\s+(?:me\s+)?|shop(?:ping)?\s+(?:for\s+)?|get\s+(?:me\s+)?|need\s+(?:a\s+)?|want\s+(?:to\s+)?(?:buy|shop|order|find))\b/i;
-  const buyingSignals = /^(?:search|find|look\s+for|buy|order|shop\s+for|get|need)\b/i;
-  const productTerms = /\b(?:shoe|shoes|slipper|slippers|sandal|sandals|phone|phones|iphone|ipad|tablet|laptop|laptops|pc|computer|charger|headset|speaker|bag|bags|dress|dresses|cloth|clothes|fabric|fabrics|jacket|jeans|perfume|wig|wigs|gadget|gadgets|generator|inverter|solar|tv|television|earpiece|watch|shoes|footwear|sandals|sneakers|heels|bag|wallet|glasses|sunglasses|makeup|cosmetics|lawyer|video\s+editor|mechanic|caterer|photographer|tailor|designer|engineer|doctor|nurse|consultant|dentist)\b/i;
-  const locationTerms = /\b(?:lagos|onitsha|enugu|abuja|ikeja|alaba|computer\s+village|main\s+market|wuse|owerri|asaba|aba|port\s+harcourt|kano|ibadan|kaduna|warri|calabar|jos|uyo|minna|benin)\b/i;
-  const priceTerms = /(?:₦|naira|ngn|\b\d+(?:\.\d+)?\s*(?:k|m|kobo|thousand|million)\b)/i;
+  if (/\b(?:register|sell\s+on\s+floate|open\s+my\s+business|merchant\s+portal|vendor\s+portal|start\s+selling|add\s+my\s+product|promote\s+my\s+product|sponsor\s+my\s+product)\b/i.test(lower)) {
+    return false;
+  }
 
-  const hasCommerceIntent = shoppingSignals.test(lower) || buyingSignals.test(lower);
-  const hasCommerceContext = productTerms.test(lower) || priceTerms.test(lower) || locationTerms.test(lower);
+  const buyerAction = /\b(?:i\s+(?:want|need|would\s+like|am\s+looking\s+for)|looking\s+for|search(?:ing)?\s+for|find\s+(?:me\s+)?|buy\s+(?:me\s+)?|order\s+(?:me\s+)?|shop(?:ping)?\s+(?:for\s+)?|get\s+(?:me\s+)?|hire|book|where\s+can\s+i\s+(?:find|buy|get)|who\s+(?:sells?|offers?)|need\s+someone\s+to)\b/i;
+  const hasKnownCategory = parseSearchQuery(text).matchedCategories.length > 0;
+  const hasServiceRole = /\b(?:designer|designers|editor|editors|developer|developers|freelancer|freelancers|photographer|photographers|videographer|videographers|lawyer|lawyers|mechanic|mechanics|tailor|tailors|plumber|plumbers|electrician|electricians|caterer|caterers|consultant|consultants|accountant|accountants|tutor|tutors|barber|barbers|hairdresser|hairdressers|makeup\s+artist|make-up\s+artist|cleaner|cleaners|driver|drivers|realtor|realtors|webmaster|webmasters|artist|artists|writer|writers|copywriter|copywriters|translator|translators|coach|coaches|instructor|instructors|stylist|stylists|technician|technicians|architect|architects|engineer|engineers|creator|creators|producer|producers|planner|planners|therapist|therapists|nurse|nurses|doctor|doctors)\b/i.test(lower);
+  const requestObject = lower
+    .replace(/^(?:i\s+(?:want|need|would\s+like)\s+(?:to\s+)?|i\s+am\s+looking\s+for\s+|looking\s+for\s+|find\s+(?:me\s+)?|search(?:ing)?\s+for\s+|buy\s+(?:me\s+)?|order\s+(?:me\s+)?|shop(?:ping)?\s+(?:for\s+)?|get\s+(?:me\s+)?|hire\s+|book\s+)/i, '')
+    .replace(/^(?:a|an|the|to)\s+/i, '')
+    .replace(/[?.!]+$/, '')
+    .trim();
+  const isBareGenericRequest = /^(?:help|support|assistance|information|advice|to know|how it works|something|anything|a business|a vendor|a merchant|a shop|a store)[?.! ]*$/i.test(lower) ||
+    /^(?:help|support|assistance|information|advice|to know|how it works)[?.! ]*$/i.test(requestObject);
 
-  if (!hasCommerceIntent || !hasCommerceContext) return false;
-
-  return !/\b(?:register|sell\s+on\s+floate|open\s+my\s+business|merchant\s+portal|vendor\s+portal|start\s+selling|add\s+my\s+product|promote\s+my\s+product|sponsor\s+my\s+product)\b/i.test(lower);
+  return !isBareGenericRequest && (
+    buyerAction.test(lower) ||
+    hasKnownCategory ||
+    hasServiceRole
+  );
 }
 
 /**
@@ -660,7 +669,7 @@ Classify the message into EXACTLY ONE of the following intents:
 - "LOCATION_CHANGE": Asking to change, update, or switch default shopping location/city (e.g., "change my location to Lagos", "update my city", "set location Abuja").
 - "BROWSE_MARKETS": Asking to explore market hubs (e.g., "browse markets", "show markets in Lagos", "view onitsha markets").
 - "RESET_OR_HOME": Requesting to cancel, reset, start over, or go to main menu.
-- "BUYER_SEARCH": The user clearly intends to find, buy, order, or hire something, including a recognizable product-only query (e.g., "leather shoes in Onitsha", "iPhone 13", "I need a lawyer", "hire video editor", "solar inverter 200k", selecting a vendor number or business name).
+- "BUYER_SEARCH": The user clearly intends to find, buy, order, or hire something, including a recognizable product-only query (e.g., "leather shoes in Onitsha", "black T-shirt", "make-up kit", "HP laptop", "I need a lawyer", "hire video editor", "I want a professional website", "find a web developer", "solar inverter 200k", selecting a vendor number or business name).
 - "CLARIFICATION_REQUIRED": The intent is unclear, the message is unrelated to Floate, or a typo/fragment does not clearly express a Floate action or shopping query.
 
 CRITICAL RULES:
@@ -1482,11 +1491,12 @@ Task: Extract structured commerce details:
    Examples:
    - "I need a lawyer" -> ["Legal Services", "Legal Consultation", "Attorney", "Law Firm", "Lawyer", "Legal Advocate"]
    - "someone to edit my videos" -> ["Video Editor", "Video Editing Services", "Videographer", "Media Production", "Content Creation"]
+   - "I want a professional website" -> ["Website Development", "Web Design", "Web Developer", "Software Development", "E-commerce Website"]
    - "car mechanic" -> ["Auto Repair", "Car Mechanic", "Automobile Repairs", "Auto Mechanic"]
    - "catering for wedding" -> ["Catering Services", "Caterer", "Event Catering", "Food Services"]
    - "leather slippers" -> ["Footwear", "Leather Slippers", "Shoes", "Plaited Slippers", "Sandals"]
    Do NOT include vague/overly broad words like "Business", "Services", "Shop", "General", "Other".
-7. "itemType": Either "product" or "service". Determine whether the clean item requested represents a physical product (e.g. "Phone", "Cloth", "Shoes", "Generator") or a service/profession to be hired or booked (e.g. "Lawyer", "Video Editor", "Mechanic", "Catering", "Graphic Designer", "Tutor", "Consultant", "Photographer").
+7. "itemType": Either "product" or "service". Determine whether the clean item requested represents a physical product (e.g. "Phone", "Cloth", "Shoes", "Make-up Kit", "Generator") or a service/profession to be hired or booked (e.g. "Lawyer", "Video Editor", "Mechanic", "Website Development", "Graphic Designer", "Tutor", "Consultant", "Photographer").
 8. "isRegistrationRequest": true ONLY if user wants to register as a business/seller.
 
 Return ONLY valid JSON format like:
@@ -1594,8 +1604,15 @@ function fallbackQueryParse(query: string): ParsedCommerceQuery {
   let category: string | null = null;
   const inferredCategories: string[] = [cleanProduct];
   const lowerProduct = cleanProduct.toLowerCase();
+  const matchedCategorySpecs = parseSearchQuery(cleanProduct).matchedCategories;
 
-  if (/lawyer|attorney|legal/i.test(lowerProduct)) {
+  if (/website|web\s*(?:site|design|development|developer)|software|coding|app\s+development/i.test(lowerProduct)) {
+    category = 'Tech & Digital Services';
+    inferredCategories.push('Website Development', 'Web Design', 'Web Developer', 'Software Development', 'E-commerce Website');
+  } else if (/make[\s-]?up|cosmetics|beauty|skincare/i.test(lowerProduct)) {
+    category = 'Beauty & Cosmetics';
+    inferredCategories.push('Makeup Kits', 'Cosmetics', 'Beauty Products', 'Makeup');
+  } else if (/lawyer|attorney|legal/i.test(lowerProduct)) {
     category = 'Legal Services';
     inferredCategories.push('Legal Services', 'Legal Consultation', 'Lawyer', 'Attorney', 'Law Firm');
   } else if (/edit|video|videographer/i.test(lowerProduct)) {
@@ -1616,9 +1633,25 @@ function fallbackQueryParse(query: string): ParsedCommerceQuery {
   } else if (/laptop|computer|macbook|pc/i.test(lowerProduct)) {
     category = 'Computing';
     inferredCategories.push('Computers', 'Laptops', 'PC & Accessories');
-  } else if (/gown|shirt|dress|fashion|cloth/i.test(lowerProduct)) {
+  } else if (/gown|t[\s-]?shirt|tee\s+shirt|shirt|dress|fashion|cloth/i.test(lowerProduct)) {
     category = 'Fashion';
     inferredCategories.push('Fashion', 'Clothing', 'Apparel');
+  }
+
+  for (const matchedCategory of matchedCategorySpecs) {
+    if (!category) category = matchedCategory.name;
+    inferredCategories.push(matchedCategory.name, ...matchedCategory.aliases);
+  }
+
+  if (/graphic\s*(?:designer|design|artist)|logo\s+design|brand(?:ing)?\s+design/i.test(lowerProduct)) {
+    category ||= 'Media & Graphic Design';
+    inferredCategories.push('Graphic Design Services', 'Graphic Designer', 'Branding', 'Logo Design');
+  } else if (/video\s*(?:editor|editing)|videograph|film\s*(?:maker|production)/i.test(lowerProduct)) {
+    category ||= 'Media & Production';
+    inferredCategories.push('Video Editing Services', 'Video Editor', 'Videography', 'Media Production');
+  } else if (/website|web\s*(?:site|design|development|developer)|software|coding|app\s+development/i.test(lowerProduct)) {
+    category ||= 'Tech & Digital Services';
+    inferredCategories.push('Website Development', 'Web Design', 'Web Developer', 'Software Development', 'E-commerce Website');
   }
 
   if (category && !inferredCategories.includes(category)) {
@@ -1627,10 +1660,12 @@ function fallbackQueryParse(query: string): ParsedCommerceQuery {
 
   const isReg = /register|list my|start business|seller account/i.test(query);
 
-  let itemType: 'product' | 'service' = 'product';
-  if (/lawyer|attorney|legal|edit|video|videographer|mechanic|repair|cater|consult|teach|tutor|design|photo|clean|laundry|hair|barber|makeup|doctor|nurse|accountant|plumb|electric|driver|tailor|service|gig/i.test(lowerProduct) ||
+  let itemType: 'product' | 'service' | undefined;
+  if (/\b(?:hire|book|service|services|website|web\s*site|web\s+design|web\s+development|software|app\s+development|graphic\s+design|designer|designers|editor|editors|developer|developers|freelancer|freelancers|photographer|photographers|videographer|videographers|lawyer|lawyers|attorney|attorneys|mechanic|mechanics|repair|caterer|caterers|consultant|consultants|tutor|tutors|barber|barbers|hairdresser|hairdressers|makeup artist|make-up artist|plumber|plumbers|electrician|electricians|cleaner|cleaners|driver|drivers|realtor|realtors|tailor|tailors)\b/i.test(lowerProduct) ||
       /services|consultation|production|catering|repair/i.test(category || '')) {
     itemType = 'service';
+  } else if (matchedCategorySpecs.length > 0) {
+    itemType = 'product';
   }
 
   return {

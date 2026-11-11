@@ -2,6 +2,11 @@ import { SEO_HUBS_DATA } from '../data/seoHubs';
 
 export const DOMAIN = 'https://www.floate.xyz';
 
+export interface SitemapProduct {
+  id: string;
+  merchantSlug?: string;
+}
+
 function escapeXml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -11,7 +16,10 @@ function escapeXml(value: string): string {
     .replace(/'/g, '&apos;');
 }
 
-export function generateSitemapXML(merchantSlugs: string[] = [], productIds: string[] = []): string {
+export function generateSitemapXML(
+  merchantSlugs: string[] = [],
+  products: Array<string | SitemapProduct> = []
+): string {
   const mainPages = [
     { url: `${DOMAIN}/`, priority: '1.0', changefreq: 'daily' },
     { url: `${DOMAIN}/about`, priority: '0.7', changefreq: 'monthly' },
@@ -30,11 +38,16 @@ export function generateSitemapXML(merchantSlugs: string[] = [], productIds: str
     changefreq: 'daily'
   }));
 
-  const productPages = [...new Set(productIds)].map((id) => ({
-    url: `${DOMAIN}/p/${encodeURIComponent(id)}`,
-    priority: '0.8',
-    changefreq: 'daily'
-  }));
+  const productPages = [...new Map(products
+    .map((item) => typeof item === 'string' ? { id: item } : item)
+    .filter((product) => Boolean(product.id.trim()))
+    .map((product) => {
+      const path = product.merchantSlug
+        ? `/p/${encodeURIComponent(product.merchantSlug)}/${encodeURIComponent(product.id.trim())}`
+        : `/p/${encodeURIComponent(product.id.trim())}`;
+      return [path, { url: `${DOMAIN}${path}`, priority: '0.8', changefreq: 'daily' }] as const;
+    }))
+    .values()];
 
   const hubPages = SEO_HUBS_DATA.map((hub) => ({
     url: `${DOMAIN}/solutions/${hub.slug}`,
