@@ -499,14 +499,9 @@ app.post(
     }
 
     try {
-      const normalizedImage = await sharp(req.body)
-        .rotate()
-        .resize(1000, 1000, { fit: "inside", withoutEnlargement: true })
-        .webp({ quality: 85, effort: 4 })
-        .toBuffer();
-      const imageUrl = await uploadImageToCloudinary(normalizedImage, {
+      const imageUrl = await uploadImageToCloudinary(req.body, {
         folder: "floate/business-profiles",
-        mimeType: "image/webp",
+        mimeType,
       });
       return res.status(201).json({ success: true, imageUrl });
     } catch (error: any) {
