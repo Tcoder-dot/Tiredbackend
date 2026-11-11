@@ -1448,24 +1448,7 @@ async function findVendorByIdentifier(param: string) {
   const cleanDigits = rawParam.replace(/[^0-9]/g, "");
   const phoneNoLeadingZero = cleanDigits.startsWith("234") ? cleanDigits.slice(3) : cleanDigits.replace(/^0+/, "");
 
-  // 1. Check anchor database records first
-  for (const [key, meta] of Object.entries(ANCHOR_BUSINESSES)) {
-    const anchorClean = meta.whatsapp.replace(/[^0-9]/g, "").replace(/^0+/, "");
-    const cityCode = ((meta.city || "LOS").replace(/[^a-zA-Z]/g, "").slice(0, 3) || "LOS").toUpperCase();
-    const phoneSuffix = (anchorClean.slice(-5) || "00525").padStart(5, '0');
-    const computedFid = `FLT-${cityCode}-${phoneSuffix}`.toUpperCase();
-
-    if (
-      rawParam.toUpperCase() === computedFid ||
-      (phoneNoLeadingZero && anchorClean === phoneNoLeadingZero) ||
-      rawParam.toLowerCase() === key.toLowerCase() ||
-      rawParam.toLowerCase() === meta.name.toLowerCase()
-    ) {
-      return buildMerchantPayload({ ...meta, fid: computedFid, verified: true, isVerified: true }, rawParam);
-    }
-  }
-
-  // 2. Query Firestore businesses collection
+  // Prefer persisted merchant records so profile changes override static anchor data.
   try {
     const snap = await getDocs(collection(firestoreDb, "businesses"));
     for (const docSnap of snap.docs) {
@@ -1473,7 +1456,7 @@ async function findVendorByIdentifier(param: string) {
       const docId = docSnap.id;
       if (docId === "test_ping" || docId === "chivora-cosmetics") continue;
 
-      const dPhone = String(d.whatsappNumber || d.whatsapp || d.phone || "").replace(/[^0-9]/g, "");
+      const dPhone = String(d.whatsappNumber || d.whatsapp || d.phone || d.whatsapp_number || "").replace(/[^0-9]/g, "");
       const dPhoneTrimmed = dPhone.startsWith("234") ? dPhone.slice(3) : dPhone.replace(/^0+/, "");
       const dSlug = String(d.slug || docId).toLowerCase();
       const dFid = String(d.fid || "").toUpperCase();
@@ -1491,7 +1474,7 @@ async function findVendorByIdentifier(param: string) {
     }
   } catch (err) {}
 
-  // 3. Resolve backend merchant records, including merchants awaiting review.
+  // Resolve backend merchant records, including merchants awaiting review.
   try {
     const snap = await getDocs(collection(firestoreDb, 'merchants'));
     for (const docSnap of snap.docs) {
@@ -1522,6 +1505,23 @@ async function findVendorByIdentifier(param: string) {
       }
     }
   } catch (err) {}
+
+  // Use anchor records only when no persisted merchant matched.
+  for (const [key, meta] of Object.entries(ANCHOR_BUSINESSES)) {
+    const anchorClean = meta.whatsapp.replace(/[^0-9]/g, "").replace(/^0+/, "");
+    const cityCode = ((meta.city || "LOS").replace(/[^a-zA-Z]/g, "").slice(0, 3) || "LOS").toUpperCase();
+    const phoneSuffix = (anchorClean.slice(-5) || "00525").padStart(5, '0');
+    const computedFid = `FLT-${cityCode}-${phoneSuffix}`.toUpperCase();
+
+    if (
+      rawParam.toUpperCase() === computedFid ||
+      (phoneNoLeadingZero && anchorClean === phoneNoLeadingZero) ||
+      rawParam.toLowerCase() === key.toLowerCase() ||
+      rawParam.toLowerCase() === meta.name.toLowerCase()
+    ) {
+      return buildMerchantPayload({ ...meta, fid: computedFid, verified: true, isVerified: true }, rawParam);
+    }
+  }
 
   return null;
 }
