@@ -95,7 +95,13 @@ function requestPinned(
         Accept: "text/html,image/jpeg,image/png,image/webp,image/gif",
         "User-Agent": "FloatePortfolioPreview/1.0"
       },
-      lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
+      lookup: (_hostname, options, callback) => {
+        if (options.all) {
+          callback(null, [address]);
+        } else {
+          callback(null, address.address, address.family);
+        }
+      },
       servername: isIP(url.hostname.replace(/^\[|\]$/g, ""))
         ? undefined
         : url.hostname.replace(/^\[|\]$/g, "")
