@@ -476,12 +476,12 @@ app.post(
 
 app.post(
   "/api/catalog/business/profile-image",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
   express.raw({ type: () => true, limit: "8mb" }),
   async (req, res) => {
-    const expectedKey = Buffer.from(process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4d5e6");
-    const providedKey = Buffer.from(req.get("x-api-key") || "");
-    if (providedKey.length !== expectedKey.length || !timingSafeEqual(providedKey, expectedKey)) {
-      return res.status(401).json({ success: false, error: "API authentication required." });
+    if (!req.user) {
+      return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to upload a profile image." });
     }
 
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
