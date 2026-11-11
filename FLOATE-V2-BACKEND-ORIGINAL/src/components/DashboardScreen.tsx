@@ -767,11 +767,12 @@ export default function DashboardScreen({
                     </div>
                     <button
                       id="wallet-top-up-quick-btn"
-                      onClick={() => setShowTopUpModal(true)}
-                      className="py-2.5 px-4 bg-black hover:bg-neutral-800 text-white rounded text-[10px] uppercase tracking-widest font-black transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-98 shrink-0"
+                      type="button"
+                      disabled
+                      className="py-2.5 px-4 bg-slate-200 text-slate-500 rounded text-[10px] uppercase tracking-widest font-black flex items-center justify-center gap-1.5 cursor-not-allowed shrink-0"
                     >
                       <Plus className="w-3.5 h-3.5 shrink-0" />
-                      <span>TOP UP</span>
+                      <span>Coming soon</span>
                     </button>
                   </div>
 
@@ -1446,10 +1447,10 @@ export default function DashboardScreen({
 
                     <button
                       type="button"
-                      onClick={() => setShowTopUpModal(true)}
-                      className="w-full py-3 bg-black hover:bg-neutral-800 text-white rounded text-[10px] uppercase tracking-widest font-extrabold transition flex items-center justify-center gap-1.5 cursor-pointer"
+                      disabled
+                      className="w-full py-3 bg-slate-200 text-slate-500 rounded text-[10px] uppercase tracking-widest font-extrabold flex items-center justify-center gap-1.5 cursor-not-allowed"
                     >
-                      Fund Wallet credits <ArrowUpRight className="w-4 h-4 text-white" />
+                      Wallet top-up coming soon
                     </button>
                   </div>
 
@@ -1852,15 +1853,14 @@ export default function DashboardScreen({
 
                       <button
                         type="button"
-                        disabled={initializingFlw}
-                        onClick={() => handlePurchasePlan('PAY_AS_YOU_GO')}
-                        className={`w-full py-2.5 text-[10px] font-bold uppercase tracking-widest rounded-lg transition active:scale-[0.98] cursor-pointer text-center ${
+                        disabled
+                        className={`w-full py-2.5 text-[10px] font-bold uppercase tracking-widest rounded-lg text-center cursor-not-allowed ${
                           user.subscriptionTier === 'PAY_AS_YOU_GO'
-                            ? 'bg-slate-100 text-slate-500 cursor-default'
-                            : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs'
+                            ? 'bg-slate-100 text-slate-500'
+                            : 'bg-slate-100 text-slate-500'
                         }`}
                       >
-                        {initializingFlw ? 'Connecting...' : user.subscriptionTier === 'PAY_AS_YOU_GO' ? 'Current Active Package' : `Buy Package (${formatPrice(10)})`}
+                        {user.subscriptionTier === 'PAY_AS_YOU_GO' ? 'Current Active Package' : 'Coming soon'}
                       </button>
                     </div>
 
@@ -1904,15 +1904,14 @@ export default function DashboardScreen({
 
                       <button
                         type="button"
-                        disabled={initializingFlw}
-                        onClick={() => handlePurchasePlan('STARTER')}
-                        className={`w-full py-2.5 text-[10px] font-bold uppercase tracking-widest rounded-lg transition active:scale-[0.98] cursor-pointer text-center ${
+                        disabled
+                        className={`w-full py-2.5 text-[10px] font-bold uppercase tracking-widest rounded-lg text-center cursor-not-allowed ${
                           user.subscriptionTier === 'STARTER'
-                            ? 'bg-slate-100 text-slate-500 cursor-default'
-                            : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs'
+                            ? 'bg-slate-100 text-slate-500'
+                            : 'bg-slate-100 text-slate-500'
                         }`}
                       >
-                        {initializingFlw ? 'Connecting...' : user.subscriptionTier === 'STARTER' ? 'Current Active Package' : `Buy Package (${formatPrice(25)})`}
+                        {user.subscriptionTier === 'STARTER' ? 'Current Active Package' : 'Coming soon'}
                       </button>
                     </div>
 
@@ -1956,15 +1955,14 @@ export default function DashboardScreen({
 
                       <button
                         type="button"
-                        disabled={initializingFlw}
-                        onClick={() => handlePurchasePlan('PRO')}
-                        className={`w-full py-2.5 text-[10px] font-bold uppercase tracking-widest rounded-lg transition active:scale-[0.98] cursor-pointer text-center ${
+                        disabled
+                        className={`w-full py-2.5 text-[10px] font-bold uppercase tracking-widest rounded-lg text-center cursor-not-allowed ${
                           user.subscriptionTier === 'PRO'
-                            ? 'bg-slate-100 text-slate-400 cursor-default border border-slate-200'
-                            : 'bg-black hover:bg-neutral-800 text-white shadow-xs'
+                            ? 'bg-slate-100 text-slate-400 border border-slate-200'
+                            : 'bg-slate-100 text-slate-500'
                         }`}
                       >
-                        {initializingFlw ? 'Connecting...' : user.subscriptionTier === 'PRO' ? 'Current Active Package' : `Subscribe to Pro (${formatPrice(49)})`}
+                        {user.subscriptionTier === 'PRO' ? 'Current Active Package' : 'Coming soon'}
                       </button>
                     </div>
                   </div>
@@ -2438,18 +2436,13 @@ export default function DashboardScreen({
                 </p>
               </div>
 
-              {initializingFlw ? (
-                <div className="py-3 bg-slate-100 w-full text-slate-600 rounded-xl text-center font-bold text-[10px] uppercase tracking-widest font-mono flex items-center justify-center gap-1.5">
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#EF4444]" /> Securing Connection...
-                </div>
-              ) : (
-                <button
-                  type="submit"
-                  className="w-full py-3 bg-[#EF4444] hover:bg-red-500 text-white rounded-xl text-[10px] uppercase tracking-widest font-extrabold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-red-950/10"
-                >
-                  Pay ₦{topUpAmount.toLocaleString()} with Flutterwave
-                </button>
-              )}
+              <button
+                type="submit"
+                disabled
+                className="w-full py-3 bg-slate-200 text-slate-500 rounded-xl text-[10px] uppercase tracking-widest font-extrabold flex items-center justify-center gap-1.5 cursor-not-allowed"
+              >
+                Wallet top-up coming soon
+              </button>
 
               <p className="text-[8px] text-slate-400 text-center uppercase tracking-widest font-mono font-bold block pt-1">
                 🔒 Secured by Flutterwave Core Gateway

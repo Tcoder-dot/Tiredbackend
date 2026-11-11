@@ -10,3 +10,11 @@ export function normalizeWhatsAppNumber(value: unknown): string | null {
 
   return /^234\d{10}$/.test(international) ? international : null;
 }
+
+export function buildMerchantWhatsAppLink(phone: unknown, message: string): string | null {
+  const international = normalizeWhatsAppNumber(phone);
+  const prefilledMessage = message.trim();
+  if (!international || !prefilledMessage) return null;
+
+  return `https://wa.me/${international}?text=${encodeURIComponent(prefilledMessage)}`;
+}

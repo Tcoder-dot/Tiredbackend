@@ -103,6 +103,7 @@ export const LaunchMonetizationHub: React.FC = () => {
   const handleInitiateFlutterwave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedTier) return;
+    if (selectedTier.currentPriceNgn > 0) return;
     if (!merchantPhone.trim()) {
       setCheckoutError('Please enter your WhatsApp phone number.');
       return;
@@ -326,20 +327,25 @@ export const LaunchMonetizationHub: React.FC = () => {
 
                   <div className="pt-6 mt-6 border-t border-slate-800/80 space-y-2">
                     <button
+                      type="button"
+                      disabled={tier.currentPriceNgn > 0}
                       onClick={() => {
+                        if (tier.currentPriceNgn > 0) return;
                         setSelectedTier(tier);
                         setCheckoutError(null);
                       }}
-                      className={`w-full py-3 px-4 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-2 ${
-                        isHighlight
-                          ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 shadow-lg shadow-amber-500/20'
-                          : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm'
+                      className={`w-full py-3 px-4 rounded-xl font-bold text-xs flex items-center justify-center gap-2 ${
+                        tier.currentPriceNgn > 0
+                          ? 'bg-slate-700 text-slate-300 cursor-not-allowed'
+                          : isHighlight
+                            ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 shadow-lg shadow-amber-500/20'
+                            : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm'
                       }`}
                     >
                       <span>
-                        {tier.currentPriceNgn === 0 ? 'Activate Free Badge' : `Pay ₦${tier.currentPriceNgn.toLocaleString()} via Flutterwave`}
+                        {tier.currentPriceNgn === 0 ? 'Activate Free Badge' : 'Coming soon'}
                       </span>
-                      <ArrowRight className="w-4 h-4" />
+                      {tier.currentPriceNgn === 0 && <ArrowRight className="w-4 h-4" />}
                     </button>
 
                     {isHighlight && (
@@ -434,8 +440,8 @@ export const LaunchMonetizationHub: React.FC = () => {
               <div className="pt-2">
                 <button
                   type="submit"
-                  disabled={checkoutLoading}
-                  className="w-full py-3.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                  disabled={checkoutLoading || selectedTier.currentPriceNgn > 0}
+                  className="w-full py-3.5 rounded-xl bg-slate-700 text-slate-300 font-bold text-sm flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {checkoutLoading ? (
                     <>
@@ -444,8 +450,7 @@ export const LaunchMonetizationHub: React.FC = () => {
                     </>
                   ) : (
                     <>
-                      <CreditCard className="w-4 h-4" />
-                      Continue to Flutterwave (₦{selectedTier.currentPriceNgn.toLocaleString()})
+                      {selectedTier.currentPriceNgn > 0 ? 'Coming soon' : 'Activate free tier'}
                     </>
                   )}
                 </button>

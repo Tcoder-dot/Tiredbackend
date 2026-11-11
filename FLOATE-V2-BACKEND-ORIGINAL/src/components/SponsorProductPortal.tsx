@@ -73,42 +73,7 @@ export const SponsorProductPortal: React.FC = () => {
 
   const handleCreateAd = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!phone || !headline) {
-      setErrorMsg('Please enter your WhatsApp phone number and ad headline.');
-      return;
-    }
-
-    setLoading(true);
-    setErrorMsg(null);
-
-    try {
-      const res = await fetch('/api/ads/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          merchantPhone: phone,
-          merchantName: bizName || 'Verified Merchant',
-          packageType: selectedPkg,
-          headline,
-          description,
-          offerText,
-          rawImageUrl: imageUrl,
-          targetCategory,
-          targetLocation,
-        }),
-      });
-
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setCreatedAd(data);
-      } else {
-        setErrorMsg(data.error || 'Failed to initialize Bachs.io ad campaign.');
-      }
-    } catch (err: any) {
-      setErrorMsg(err?.message || 'Network error creating ad campaign.');
-    } finally {
-      setLoading(false);
-    }
+    setErrorMsg('Ad campaigns and payments are coming soon.');
   };
 
   const selectedPkgDetails = PACKAGES.find((p) => p.id === selectedPkg);
@@ -121,13 +86,13 @@ export const SponsorProductPortal: React.FC = () => {
         <div className="relative z-10 space-y-2">
           <div className="inline-flex items-center space-x-2 bg-amber-500/15 border border-amber-500/30 text-amber-400 px-3 py-1 rounded-full text-xs font-semibold">
             <Sparkles className="w-3.5 h-3.5" />
-            <span>Sponsor Products & Run Ads with Bachs.io</span>
+            <span>Sponsor Products & Run Ads — Coming soon</span>
           </div>
           <h2 className="text-2xl font-black text-white tracking-tight">
             FLOATE Ad Banner & Product Sponsorship Portal
           </h2>
           <p className="text-xs text-slate-300 max-w-2xl">
-            Promote your store across floate.xyz home page, category spotlights, and top search queries across Nigeria. Securely pay via Bachs.io and get instant WhatsApp Super Admin verification.
+            Paid product sponsorships and ad campaigns are coming soon.
           </p>
         </div>
       </div>
@@ -281,21 +246,10 @@ export const SponsorProductPortal: React.FC = () => {
 
             <button
               type="submit"
-              disabled={loading}
-              className="w-full py-3.5 px-4 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black rounded-xl shadow-lg transition-all flex items-center justify-center space-x-2 text-sm"
+              disabled
+              className="w-full py-3.5 px-4 bg-slate-700 text-slate-300 font-black rounded-xl flex items-center justify-center space-x-2 text-sm cursor-not-allowed"
             >
-              {loading ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Initializing Bachs.io Payment...</span>
-                </>
-              ) : (
-                <>
-                  <CreditCard className="w-4 h-4" />
-                  <span>Pay ₦{selectedPkgDetails?.priceNaira.toLocaleString()} via Bachs.io</span>
-                  <ArrowRight className="w-4 h-4" />
-                </>
-              )}
+              Coming soon
             </button>
           </form>
 
@@ -304,7 +258,7 @@ export const SponsorProductPortal: React.FC = () => {
             <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-2xl p-5 space-y-3 animate-in fade-in duration-200">
               <div className="flex items-center space-x-2 text-emerald-400 font-bold text-sm">
                 <CheckCircle2 className="w-5 h-5" />
-                <span>Ad Campaign Created! Complete Payment Below:</span>
+                <span>Ad campaign payments are coming soon.</span>
               </div>
 
               <p className="text-xs text-slate-300">
@@ -312,15 +266,13 @@ export const SponsorProductPortal: React.FC = () => {
                 <strong>₦{createdAd.amountNaira?.toLocaleString()}</strong>
               </p>
 
-              <a
-                href={createdAd.checkoutUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="w-full py-3 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl shadow-lg transition-all flex items-center justify-center space-x-2 text-xs"
+              <button
+                type="button"
+                disabled
+                className="w-full py-3 px-4 bg-slate-700 text-slate-300 font-bold rounded-xl flex items-center justify-center space-x-2 text-xs cursor-not-allowed"
               >
-                <span>💳 Open Bachs.io Secure Payment Page</span>
-                <ExternalLink className="w-4 h-4" />
-              </a>
+                Coming soon
+              </button>
             </div>
           )}
         </div>

@@ -147,7 +147,7 @@ export const PricingUpgradeMatrix: React.FC<PricingUpgradeMatrixProps> = ({
 
   const handleProcessCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedPkg) return;
+    if (!selectedPkg || selectedPkg.launchPriceNaira > 0) return;
     if (!phone.trim()) {
       setErrorMsg("Please enter your WhatsApp merchant phone number.");
       return;
@@ -286,16 +286,15 @@ export const PricingUpgradeMatrix: React.FC<PricingUpgradeMatrixProps> = ({
                     </div>
                   ) : (
                     <button
-                      onClick={() => handleOpenCheckout(pkg)}
-                      className={`w-full py-3.5 px-4 rounded-2xl font-black text-xs uppercase tracking-wider transition-transform active:scale-95 shadow-md flex items-center justify-center gap-2 cursor-pointer ${
+                      type="button"
+                      disabled
+                      className={`w-full py-3.5 px-4 rounded-2xl font-black text-xs uppercase tracking-wider shadow-md flex items-center justify-center gap-2 cursor-not-allowed opacity-60 ${
                         pkg.isPopular
-                          ? "bg-[#FFC107] hover:bg-[#ffcd38] text-[#123F16]"
-                          : "bg-[#123F16] hover:bg-[#0A4D3C] text-white"
+                          ? "bg-[#FFC107] text-[#123F16]"
+                          : "bg-[#123F16] text-white"
                       }`}
                     >
-                      <CreditCard className="w-4 h-4" />
-                      <span>Get More Customers</span>
-                      <ArrowRight className="w-4 h-4" />
+                      <span>Coming soon</span>
                     </button>
                   )}
                 </div>
@@ -392,17 +391,10 @@ export const PricingUpgradeMatrix: React.FC<PricingUpgradeMatrixProps> = ({
 
               <button
                 type="submit"
-                disabled={isSubmitting}
-                className="w-full py-4 rounded-2xl bg-[#25D366] hover:bg-[#20bd5a] text-[#123F16] font-black text-sm uppercase tracking-wider shadow-md transition-transform active:scale-95 disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
+                disabled
+                className="w-full py-4 rounded-2xl bg-slate-200 text-slate-500 font-black text-sm uppercase tracking-wider cursor-not-allowed flex items-center justify-center gap-2"
               >
-                {isSubmitting ? (
-                  <span>Connecting to Flutterwave...</span>
-                ) : (
-                  <>
-                    <CreditCard className="w-4 h-4" />
-                    <span>Pay ₦{selectedPkg.launchPriceNaira.toLocaleString()} with Flutterwave</span>
-                  </>
-                )}
+                Coming soon
               </button>
             </form>
           </div>
