@@ -807,45 +807,16 @@ const deliverRegistrationCertificate = async (input: {
   businessName: string;
   ownerName: string;
   phone: string;
-  city: string;
-  state: string;
-  photoUrl?: string;
-  certificateId?: string;
 }): Promise<boolean> => {
   try {
-    const locationParts = [input.city, input.state].filter(Boolean);
-    if (!locationParts.some((part) => part.toLowerCase() === "nigeria")) locationParts.push("Nigeria");
-    const credential = createCredentialForMerchant({
-      merchantId: `vendor_${input.phone}`,
-      name: input.ownerName || input.businessName,
-      biz: input.businessName || "Floate Merchant",
-      loc: locationParts.join(", "),
-      phone: input.phone,
-      photoUrl: input.photoUrl,
-      customFid: input.certificateId,
-    });
-    const certificate = await renderCredentialPng(credential, "certificate");
-    let imageUrl = "";
-    try {
-      imageUrl = await uploadImageToCloudinary(certificate.buffer, {
-        folder: "floate/business-certificates",
-        publicId: credential.fid,
-        mimeType: "image/png",
-      });
-    } catch (error) {
-      console.warn("[Registration] Certificate image upload failed; using the public certificate endpoint:", error);
-    }
-
-    const certificateUrl = imageUrl ||
-      `${getAppBaseUrl()}/api/credentials/${encodeURIComponent(input.phone)}/download/certificate`;
     const sent = await sendWhatsAppMessage(
       input.phone,
-      `Congratulations, ${input.businessName || "your business"} is now registered with Floate. Your business certificate is attached. Keep it as proof of your Floate registration.`,
+      `🎉 Congratulations${input.ownerName ? `, *${input.ownerName}*` : ''}! Your business *${input.businessName || "Floate"}* is registered with Floate.\n\n` +
+      `Your personalized business certificate is ready. Tap below to receive the certificate image on WhatsApp.`,
       {
-        image: {
-          url: certificateUrl,
-          caption: `Congratulations, ${input.businessName || "your business"} is registered with Floate. Your certificate is attached. Certificate ID: ${credential.fid}`,
-        },
+        quickReplies: [
+          { id: "btn_download_certificate", title: "Download Certificate" },
+        ],
       }
     );
     if (!sent) console.error(`[Registration] WhatsApp certificate delivery failed for +${input.phone}.`);
@@ -963,17 +934,11 @@ app.post("/api/register/business", async (req, res) => {
           remoteData || { success: false, error: "Backend returned an invalid registration response." }
         );
       }
-      if (remoteData.certificateSent !== true) {
-        const certificateSent = await deliverRegistrationCertificate({
-          businessName: String(businessName || "Floate Merchant"),
-          ownerName: String(ownerName || businessName || ""),
-          phone: intlPhone,
-          city: String(city || ""),
-          state: String(state || ""),
-          photoUrl: String(photo || ""),
-        });
-        remoteData.certificateSent = certificateSent;
-      }
+      remoteData.certificateSent = await deliverRegistrationCertificate({
+        businessName: String(businessName || "Floate Merchant"),
+        ownerName: String(ownerName || businessName || ""),
+        phone: intlPhone,
+      });
       remoteData.storeUrl = `/vendor/${merchantSlug}`;
       return res.status(remoteRes.status).json(remoteData);
     } catch (e) {
@@ -1142,10 +1107,6 @@ app.post("/api/register/business", async (req, res) => {
       businessName: String(businessName || "Market Merchant"),
       ownerName: String(ownerName || businessName || ""),
       phone: intlPhone,
-      city: String(city || marketHub || ""),
-      state: String(state || ""),
-      photoUrl: String(photo || ""),
-      certificateId: credential.fid,
     });
 
     return res.json({
@@ -1220,7 +1181,40 @@ app.get("/api/credentials/:slug/download/certificate", async (req, res) => {
   if (!identifier) return res.status(400).json({ success: false, error: "Merchant identifier is required." });
 
   try {
-    const credential = await resolveCredential(identifier);
+    let credential: Awaited<ReturnType<typeof resolveCredential>> = null;
+    const merchantPhone = normalizeWhatsAppNumber(identifier);
+    if (merchantPhone) {
+      const businessSnapshot = await getDoc(doc(firestoreDb, "businesses", `vendor_${merchantPhone}`));
+      if (businessSnapshot.exists()) {
+        const business = businessSnapshot.data();
+        const location = String(
+          business.marketLocation ||
+          [business.marketHub || business.city, business.state].filter(Boolean).join(", ") ||
+          "Nigeria"
+        );
+        credential = createCredentialForMerchant({
+          merchantId: String(business.id || `vendor_${merchantPhone}`),
+          name: String(business.ownerFullName || business.ownerName || business.name || business.businessName || "Floate Merchant"),
+          biz: String(business.businessName || business.name || "Floate Merchant"),
+          loc: location,
+          phone: merchantPhone,
+          isPlus: Boolean(business.isVerifiedPlus),
+          photoUrl: String(
+            business.profilePhotoUrl ||
+            business.profileImageUrl ||
+            business.selfieUrl ||
+            business.avatarUrl ||
+            business.avatar_url ||
+            business.imageUrl ||
+            business.photoUrl ||
+            ""
+          ),
+          customFid: typeof business.certificateId === "string" ? business.certificateId : undefined,
+        });
+      }
+    }
+
+    credential ||= await resolveCredential(identifier);
     if (!credential) return res.status(404).json({ success: false, error: "Merchant certificate could not be found." });
 
     const asset = await renderCredentialPng(credential, "certificate");

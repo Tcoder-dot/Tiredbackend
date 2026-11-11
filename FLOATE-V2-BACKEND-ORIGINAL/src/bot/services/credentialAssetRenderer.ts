@@ -13,7 +13,6 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   findCredentialByFid,
-  SAMPLE_CREDENTIALS,
   createCredentialForMerchant,
   FloateCredential,
 } from './credentialService.js';
@@ -33,12 +32,19 @@ export async function resolveCredential(fidOrPhone: string): Promise<FloateCrede
     if (directMerchant) {
       return createCredentialForMerchant({
         merchantId: directMerchant.id || directMerchant.whatsapp,
-        name: directMerchant.ownerFullName || directMerchant.businessName || 'Verified Merchant',
+        name: directMerchant.ownerFullName || (directMerchant as any).ownerName || directMerchant.businessName || 'Verified Merchant',
         biz: directMerchant.businessName || 'Verified Enterprise',
-        loc: `${directMerchant.city || directMerchant.state || 'Market Hub'}, Nigeria`,
+        loc: [(directMerchant as any).marketHub || directMerchant.city, directMerchant.state].filter(Boolean).join(', ') || 'Nigeria',
         phone: directMerchant.whatsapp,
         isPlus: Boolean(directMerchant.isVerifiedPlus),
-        photoUrl: directMerchant.profilePhotoUrl || directMerchant.photoUrl,
+        photoUrl: directMerchant.profilePhotoUrl ||
+          (directMerchant as any).profileImageUrl ||
+          (directMerchant as any).selfieUrl ||
+          (directMerchant as any).kycSelfieUrl ||
+          (directMerchant as any).avatarUrl ||
+          (directMerchant as any).avatar_url ||
+          (directMerchant as any).imageUrl ||
+          directMerchant.photoUrl,
         customFid: cleanId.startsWith('FLT-') ? cleanId : directMerchant.certificateId,
       });
     }
@@ -65,12 +71,19 @@ export async function resolveCredential(fidOrPhone: string): Promise<FloateCrede
     if (merchant) {
       return createCredentialForMerchant({
         merchantId: merchant.id || merchant.whatsapp,
-        name: merchant.ownerFullName || merchant.businessName || 'Verified Merchant',
+        name: merchant.ownerFullName || (merchant as any).ownerName || merchant.businessName || 'Verified Merchant',
         biz: merchant.businessName || 'Verified Enterprise',
-        loc: `${merchant.city || merchant.state || 'Market Hub'}, Nigeria`,
+        loc: [(merchant as any).marketHub || merchant.city, merchant.state].filter(Boolean).join(', ') || 'Nigeria',
         phone: merchant.whatsapp,
         isPlus: Boolean(merchant.isVerifiedPlus),
-        photoUrl: merchant.profilePhotoUrl || merchant.photoUrl,
+        photoUrl: merchant.profilePhotoUrl ||
+          (merchant as any).profileImageUrl ||
+          (merchant as any).selfieUrl ||
+          (merchant as any).kycSelfieUrl ||
+          (merchant as any).avatarUrl ||
+          (merchant as any).avatar_url ||
+          (merchant as any).imageUrl ||
+          merchant.photoUrl,
         customFid: cleanId.startsWith('FLT-') ? cleanId : merchant.certificateId,
       });
     }
@@ -78,25 +91,7 @@ export async function resolveCredential(fidOrPhone: string): Promise<FloateCrede
     console.warn('[resolveCredential Warning]:', err);
   }
 
-  // 4. Fallback: Parse FID parameters or generate dynamic credential from rawId
-  const cleanPhone = rawId.replace(/\D/g, '');
-  if (cleanPhone.length >= 7) {
-    return createCredentialForMerchant({
-      merchantId: cleanPhone,
-      name: 'Verified Merchant',
-      biz: `Store ${cleanPhone.slice(-4)}`,
-      loc: 'Lagos Island, Lagos',
-      phone: cleanPhone,
-      isPlus: true,
-      customFid: cleanId.startsWith('FLT-') ? cleanId : undefined,
-    });
-  }
-
-  const fallbackSample = SAMPLE_CREDENTIALS[3] || SAMPLE_CREDENTIALS[0];
-  return {
-    ...fallbackSample,
-    fid: cleanId.startsWith('FLT-') ? cleanId : fallbackSample.fid,
-  };
+  return null;
 }
 
 /**

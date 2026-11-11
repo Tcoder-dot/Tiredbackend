@@ -67,7 +67,6 @@ import { monnifyService } from './monnifyService.js';
 import { flutterwaveService, FLOATE_CREDIT_PACKAGES, calculateCustomCredits, resolveNigerianBankCode } from './flutterwaveService.js';
 import { getDeployedFlowIds, handleFlowSubmission } from './whatsappFlowService.js';
 import { resolveCredential } from './credentialAssetRenderer.js';
-import { createCredentialForMerchant } from './credentialService.js';
 import { monetizationService } from './monetizationService.js';
 import { listAds } from './adminAdStore.js';
 
@@ -296,35 +295,25 @@ export function toAbsoluteMediaUrl(url?: string): string | undefined {
 export async function sendMerchantVisualAssetsToWhatsApp(
   toPhone: string,
   merchantName?: string,
-  storeName?: string,
-  location?: string
+  storeName?: string
 ): Promise<boolean> {
   try {
     const cleanPhone = toPhone.replace(/\D/g, '');
     const merchant = await firestoreDb.getMerchant(cleanPhone);
-    const finalBizName = storeName || merchant?.businessName || 'Verified Merchant';
-    const finalOwnerName = merchantName || merchant?.ownerFullName || finalBizName;
-    const finalLocation = location || [merchant?.city, merchant?.state].filter(Boolean).join(', ') || 'Nigeria';
-
-    const credential = createCredentialForMerchant({
-      merchantId: cleanPhone,
-      name: finalOwnerName,
-      biz: finalBizName,
-      loc: finalLocation,
-      phone: cleanPhone,
-      isPlus: true,
-    });
-
+    const finalBizName = storeName || merchant?.businessName || '';
+    const finalOwnerName = merchantName || merchant?.ownerFullName || '';
+    if (!merchant && !storeName) {
+      console.error(`[WhatsApp Certificate] Merchant profile is missing for +${cleanPhone}.`);
+    }
     const baseUrl = getAppBaseUrl();
-    const certImgUrl = `${baseUrl}/api/credentials/${credential.fid}/download/certificate`;
+    const certImgUrl = `${baseUrl}/api/credentials/${encodeURIComponent(cleanPhone)}/download/certificate`;
 
-    console.log(`[Auto WhatsApp Asset Push] 📜 Pushing official certificate directly to +${cleanPhone} (${credential.fid})`);
+    console.log(`[WhatsApp Certificate] Sending merchant certificate to +${cleanPhone}`);
 
-    // Send only the official certificate image as requested by user
     return await sendWhatsAppMessage(cleanPhone, '', {
       image: {
         url: certImgUrl,
-        caption: `📜 *Official Certificate of Verification & Trust*\nStore: *${finalBizName}*\nFID: *${credential.fid}*\n\nYour verified store certificate is ready. You can download or print this official certificate anytime!`,
+        caption: `📜 *Official Floate Business Certificate*${finalBizName ? `\nBusiness: *${finalBizName}*` : ''}${finalOwnerName ? `\nOwner: *${finalOwnerName}*` : ''}\n\nYour personalized certificate is ready to download or print.`,
       },
     });
   } catch (err) {
@@ -4681,7 +4670,7 @@ export async function processMasterWhatsAppEngine(params: {
   if (isCredentialRequest) {
     await firestoreDb.recordFirstContact(cleanPhone, senderName);
     const merchant = await firestoreDb.getMerchant(cleanPhone);
-    await sendMerchantVisualAssetsToWhatsApp(cleanPhone, merchant?.ownerFullName, merchant?.businessName, merchant?.city || merchant?.state);
+    await sendMerchantVisualAssetsToWhatsApp(cleanPhone, merchant?.ownerFullName, merchant?.businessName);
     return;
   }
 
@@ -8360,7 +8349,7 @@ async function handleVendorStats(toPhone: string, senderName: string) {
 
   await sendWhatsAppMessage(toPhone, statsMsg, {
     quickReplies: [
-      { id: 'btn_download_kit', title: '🛡️ Brand Kit' },
+      { id: 'btn_download_certificate', title: '📜 Certificate' },
       { id: 'btn_boost_product', title: '🚀 Boost Product' },
       { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
     ],
@@ -9362,7 +9351,7 @@ async function handleVendorVerifiedPlusUpgrade(cleanPhone: string, senderName: s
   await sendWhatsAppMessage(cleanPhone, plusMsg, {
     quickReplies: [
       { id: 'btn_pay_verified_plus', title: '💳 Pay ₦5,000 Now' },
-      { id: 'btn_download_kit', title: '🛡️ View My Brand Kit' },
+      { id: 'btn_download_certificate', title: '📜 Certificate' },
       { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
     ],
   });
@@ -9389,7 +9378,7 @@ async function handleVendorMyStore(cleanPhone: string, senderName: string): Prom
 
   await sendWhatsAppMessage(cleanPhone, storeMsg, {
     quickReplies: [
-      { id: 'btn_download_kit', title: '🛡️ Download Brand Kit' },
+      { id: 'btn_download_certificate', title: '📜 Certificate' },
       { id: 'btn_vendor_add_product', title: '➕ Add Product' },
       { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
     ],
@@ -11693,6 +11682,10 @@ async function handleWhatsAppVerificationSteps(
         phone: toPhone,
         businessName: finalBizName,
         ownerFullName: finalOwnerName,
+        profilePhotoUrl: existingMerchant?.profilePhotoUrl ||
+          (existingMerchant as any)?.selfieUrl ||
+          (existingMerchant as any)?.avatarUrl ||
+          (existingMerchant as any)?.photoUrl,
         category: draft.category || 'General Merchandise',
         location: finalLocation,
         city: draft.city || 'Lagos',
@@ -11792,12 +11785,10 @@ async function handleWhatsAppVerificationSteps(
       quickReplies: [
         { id: 'btn_my_store', title: '🏪 My Store' },
         { id: 'btn_add_product', title: '➕ Add Product' },
-        { id: 'btn_download_badge', title: '🎨 Get Store Posters' },
+        { id: 'btn_download_certificate', title: 'Download Certificate' },
       ],
     });
 
-    // Automatically send verified store badge card, certificate, and stall flyer pictures directly into WhatsApp!
-    await sendMerchantVisualAssetsToWhatsApp(toPhone, finalOwnerName, finalBizName, finalLocation);
     return;
   }
 }
@@ -12096,7 +12087,7 @@ async function handleRegistrationSteps(
     : `Credits: *25 Free Customers credited to +${toPhone}*\n` + (session?.referredBy ? `_🎁 Referral Bonus: Add your first product anytime to activate +10 bonus customer credits!_\n` : '');
 
   const confirmCard =
-    `*Registration Successful* 🎉\n` +
+    `🎉 *Congratulations on your Floate business registration!*\n` +
     `─────────────────────────\n` +
     `Store: *${bizName}*\n` +
     `Owner: *${ownerFullName}*\n` +
@@ -12113,7 +12104,7 @@ async function handleRegistrationSteps(
 
   await sendWhatsAppMessage(toPhone, confirmCard, {
     quickReplies: [
-      { id: 'btn_download_kit', title: '🛡️ Brand Kit' },
+      { id: 'btn_download_certificate', title: 'Download Certificate' },
       { id: 'btn_vendor_add_product', title: '➕ Add Product' },
       { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
     ],
@@ -12152,7 +12143,7 @@ async function handleFaqMenu(toPhone: string, senderName: string) {
       ],
     },
     quickReplies: [
-      { id: 'btn_download_kit', title: '🛡️ Brand Kit' },
+      { id: 'btn_download_certificate', title: '📜 Certificate' },
       { id: 'btn_find_product', title: '🔍 Search Items' },
       { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
     ],
@@ -12197,7 +12188,7 @@ async function handleFaqSelection(toPhone: string, senderName: string, faqId: st
   await sendWhatsAppMessage(toPhone, answer, {
     quickReplies: [
       { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
-      { id: 'btn_download_kit', title: '🛡️ Brand Kit' },
+      { id: 'btn_download_certificate', title: '📜 Certificate' },
       { id: 'btn_find_product', title: '🔍 Search Items' },
     ],
   });
@@ -12305,7 +12296,7 @@ async function handleClaimProcessSteps(toPhone: string, senderName: string, text
         `Your physical stall credentials and brand kit are now active. When buyers search for your products on FLOATE, they will be connected directly to your WhatsApp with 0% commission!`,
         {
           quickReplies: [
-            { id: 'btn_download_kit', title: '🛡️ Brand Kit' },
+            { id: 'btn_download_certificate', title: '📜 Certificate' },
             { id: 'btn_vendor_add_product', title: '➕ Add Product' },
             { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
           ],
@@ -12392,7 +12383,7 @@ async function handleClaimProcessSteps(toPhone: string, senderName: string, text
       `Your physical stall credentials and brand kit are now active. When buyers search for your products on FLOATE, they will be connected directly to your WhatsApp with 0% commission!`,
       {
         quickReplies: [
-          { id: 'btn_download_kit', title: '🛡️ Brand Kit' },
+          { id: 'btn_download_certificate', title: '📜 Certificate' },
           { id: 'btn_vendor_add_product', title: '➕ Add Product' },
           { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
         ],
