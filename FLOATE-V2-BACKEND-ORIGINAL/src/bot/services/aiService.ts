@@ -367,9 +367,6 @@ export function isBusinessRegistrationPhrase(rawInput: string): boolean {
   // Fast explicit tokens and payloads
   if (
     text === 'START_REGISTER_VENDOR' ||
-    text === 'btn_for_businesses' ||
-    text === 'btn_vendor_portal' ||
-    text === 'btn_vendor_dashboard' ||
     text === 'btn_start_registration' ||
     text === 'btn_register_business' ||
     text === 'btn_register_store' ||
@@ -380,7 +377,7 @@ export function isBusinessRegistrationPhrase(rawInput: string): boolean {
   }
 
   // Common natural phrasing: "I want to register my solar business", "I will like to register my business", "I would like to open a shop", "I wan register my store"
-  const hasRegIntent = /\b(?:(?:i\s+)?(?:will|would|wan|want|wish|like|need|love|planning|hoping)?\s*(?:to\s+)?(?:register|open|list|add|start|create|setup|set\s+up|join|onboard|launch)\s+(?:my\s+|a\s+|our\s+)?(?:[a-z0-9_-]+\s+)?(?:business|store|shop|company|enterprise|venture|brand|hub|firm|outfit|services?))\b/i.test(lower);
+  const hasRegIntent = /\b(?:(?:i\s+)?(?:will|would|wan|want|wish|like|need|love|planning|hoping)?\s*(?:to\s+)?(?:register|open|list|add|start|create|setup|set\s+up|join|onboard|launch)\s+(?:my\s+|a\s+|our\s+)?(?:[a-z0-9_-]+\s+)?(?:business|store|shop|company|enterprise|venture|brand|firm|outfit|services?))\b/i.test(lower);
   if (hasRegIntent) return true;
 
   // "register as a vendor / seller / merchant"
@@ -399,7 +396,7 @@ export function isBusinessRegistrationPhrase(rawInput: string): boolean {
   }
 
   // "vendor registration", "business registration", "store registration", "merchant registration"
-  if (/\b(?:vendor|merchant|business|store|shop)\s+(?:registration|onboarding|sign\s*up|portal|hub|dashboard)\b/i.test(lower)) {
+  if (/\b(?:vendor|merchant|business|store|shop)\s+(?:registration|onboarding|sign\s*up)\b/i.test(lower)) {
     return true;
   }
 
@@ -842,8 +839,8 @@ function fallbackIntentClassifier(text: string, lower: string): InboundClassific
     text === 'btn_start_registration' ||
     text === 'btn_register_business' ||
     text === 'btn_register_store' ||
-    /\b(access\s+(my\s+)?(business|store|shop|account)|open\s+(my\s+)?(business|store|shop)|manage\s+(my\s+)?(business|store|shop)|register\s+(my\s+)?(business|store|shop|account|company)|i\s+want\s+to\s+(register|sell|start\s+selling|list\s+my\s+shop)|become\s+a\s+(seller|vendor|merchant)|sell\s+on\s+floate|merchant\s+registration|vendor\s+registration|vendor\s+portal|merchant\s+portal|business\s+dashboard|store\s+dashboard)\b/i.test(lower) ||
-    /^(how do i access my business|access my business|my business|my store|my shop|register business|register my business|register shop|start selling|vendor registration|merchant registration|open shop|add my shop|list my shop|vendor hub|vendor portal|merchant portal)$/i.test(lower)
+    /\b(access\s+(my\s+)?(business|store|shop|account)|open\s+(my\s+)?(business|store|shop)|manage\s+(my\s+)?(business|store|shop)|register\s+(my\s+)?(business|store|shop|account|company)|i\s+want\s+to\s+(register|sell|start\s+selling|list\s+my\s+shop)|become\s+a\s+(seller|vendor|merchant)|sell\s+on\s+floate|merchant\s+registration|vendor\s+registration|vendor\s+portal|merchant\s+portal|merchant\s+hub|vendor\s+hub|merchant\s+dashboard|vendor\s+dashboard|business\s+dashboard|store\s+dashboard)\b/i.test(lower) ||
+    /^(how do i access my business|access my business|my business|my store|my shop|my merchant hub|my vendor hub|my merchant dashboard|my business dashboard|register business|register my business|register shop|start selling|vendor registration|merchant registration|open shop|add my shop|list my shop|vendor hub|vendor portal|merchant hub|merchant portal)$/i.test(lower)
   ) {
     return { intent: 'MERCHANT_PORTAL', confidence: 0.95, rawText: text };
   }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyInboundIntent } from './aiService.ts';
+import { classifyInboundIntent, isBusinessRegistrationPhrase } from './aiService.ts';
 
 test('direct product queries classify as buyer search immediately', async () => {
   const samples = [
@@ -35,4 +35,13 @@ test('generic help requests are not mistaken for catalog searches', async () => 
 test('greetings still stay on greeting intent', async () => {
   const result = await classifyInboundIntent('Hi Floate');
   assert.equal(result.intent, 'GREETING');
+});
+
+test('merchant hub access opens the portal without starting registration', async () => {
+  const phrase = 'My merchant hub';
+  assert.equal(isBusinessRegistrationPhrase(phrase), false);
+  assert.equal(isBusinessRegistrationPhrase('I want to register my business'), true);
+
+  const result = await classifyInboundIntent(phrase);
+  assert.equal(result.intent, 'MERCHANT_PORTAL');
 });
