@@ -918,6 +918,14 @@ app.post("/api/register/business", async (req, res) => {
   if (!merchantSlug || !normalizeWhatsAppNumber(phone)) {
     return res.status(400).json({ success: false, error: "Enter a valid business name and WhatsApp number." });
   }
+  try {
+    const profileImage = new URL(String(photo || ""));
+    if (profileImage.protocol !== "https:" || profileImage.hostname !== "res.cloudinary.com") {
+      return res.status(400).json({ success: false, error: "A captured profile selfie is required to register." });
+    }
+  } catch {
+    return res.status(400).json({ success: false, error: "A captured profile selfie is required to register." });
+  }
 
   try {
     const conflict = await findRegistrationConflict(String(businessName), intlPhone);
@@ -1043,6 +1051,7 @@ app.post("/api/register/business", async (req, res) => {
       loc: credentialLocation.join(", ") || "Nigeria",
       phone: intlPhone,
     });
+    const createdAt = new Date().toISOString();
     const businessData = {
       id: docId,
       slug: merchantSlug,
@@ -1065,6 +1074,7 @@ app.post("/api/register/business", async (req, res) => {
       avatarUrl: photo,
       avatar_url: photo,
       imageUrl: photo,
+      profileImageChangedAt: createdAt,
       certificateId: credential.fid,
       selfieUrl: photo,
       description: resolvedDescription,
@@ -1075,7 +1085,7 @@ app.post("/api/register/business", async (req, res) => {
       credits: 25,
       initialProduct: initialProduct || null,
       products: initialProductList,
-      createdAt: new Date().toISOString()
+      createdAt
     };
 
     const registrationNameKey = doc(firestoreDb, "business_registration_keys", `name_${merchantSlug}`);
@@ -1084,7 +1094,6 @@ app.post("/api/register/business", async (req, res) => {
     const productRef = initialProductList[0]
       ? doc(firestoreDb, "products", initialProductList[0].id)
       : null;
-    const createdAt = new Date().toISOString();
     const registrationResult = await runTransaction(firestoreDb, async (transaction) => {
       const [nameKeySnapshot, phoneKeySnapshot] = await Promise.all([
         transaction.get(registrationNameKey),
@@ -1833,22 +1842,112 @@ app.get(
   }
 );
 
+const parseProfileImageTimestamp = (value: unknown): Date | null => {
+  let date: Date | null = null;
+  if (value instanceof Date) {
+    date = value;
+  } else if (typeof value === "string" || typeof value === "number") {
+    date = new Date(value);
+  } else if (value && typeof value === "object" && "toDate" in value && typeof value.toDate === "function") {
+    date = value.toDate();
+  }
+  return date && Number.isFinite(date.getTime()) ? date : null;
+};
+
+const addSixCalendarMonths = (date: Date): Date => {
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth() + 6;
+  const day = date.getUTCDate();
+  const targetMonth = new Date(Date.UTC(year, month, 1));
+  const lastDayOfTargetMonth = new Date(Date.UTC(targetMonth.getUTCFullYear(), targetMonth.getUTCMonth() + 1, 0)).getUTCDate();
+  targetMonth.setUTCDate(Math.min(day, lastDayOfTargetMonth));
+  targetMonth.setUTCHours(date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds(), date.getUTCMilliseconds());
+  return targetMonth;
+};
+
+const getProfileImageEligibility = (business: Record<string, unknown>, now = new Date()) => {
+  const lastChangedAt = parseProfileImageTimestamp(business.profileImageChangedAt)
+    || parseProfileImageTimestamp(business.createdAt);
+  const eligibleAt = lastChangedAt ? addSixCalendarMonths(lastChangedAt) : null;
+  return {
+    allowed: !eligibleAt || now >= eligibleAt,
+    lastChangedAt: lastChangedAt?.toISOString() || null,
+    eligibleAt: eligibleAt?.toISOString() || null
+  };
+};
+
+const getMatchingMerchantDocs = async (phone: string) => {
+  const [businesses, merchants] = await Promise.all([
+    getDocs(collection(firestoreDb, "businesses")),
+    getDocs(collection(firestoreDb, "merchants"))
+  ]);
+  return [...businesses.docs, ...merchants.docs].filter((merchantDoc) => {
+    const business = merchantDoc.data();
+    const merchantPhones = [
+      business.whatsappNumber,
+      business.whatsapp,
+      business.phone,
+      business.whatsapp_number
+    ]
+      .map(normalizeWhatsAppNumber)
+      .filter((candidate): candidate is string => Boolean(candidate));
+    return merchantPhones.includes(phone);
+  });
+};
+
+const authorizeProfileImageRequest = (req: express.Request, res: express.Response): string | null => {
+  if (!req.user) {
+    res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to update this image." });
+    return null;
+  }
+  const requestedPhone = normalizeWhatsAppNumber(String(req.params.phone || ""));
+  const authenticatedPhones = [req.user.phone, req.user.id, req.user.vendorId]
+    .map((value) => normalizeWhatsAppNumber(value))
+    .filter(Boolean);
+  if (!requestedPhone || !authenticatedPhones.includes(requestedPhone)) {
+    res.status(403).json({ success: false, error: "You can only update the profile image for your own business." });
+    return null;
+  }
+  return requestedPhone;
+};
+
+app.get(
+  "/api/catalog/vendor/:phone/profile-image/eligibility",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  async (req, res) => {
+    const requestedPhone = authorizeProfileImageRequest(req, res);
+    if (!requestedPhone) return;
+
+    try {
+      const matchingMerchantDocs = await getMatchingMerchantDocs(requestedPhone);
+      if (matchingMerchantDocs.length === 0) {
+        return res.status(404).json({ success: false, error: "Merchant not found." });
+      }
+      const now = new Date();
+      const eligibility = matchingMerchantDocs
+        .map((merchantDoc) => getProfileImageEligibility(merchantDoc.data(), now))
+        .sort((left, right) => (right.eligibleAt || "").localeCompare(left.eligibleAt || ""))[0];
+      return res.json({
+        success: true,
+        canChange: eligibility.allowed,
+        lastChangedAt: eligibility.lastChangedAt,
+        eligibleAt: eligibility.eligibleAt
+      });
+    } catch (error) {
+      console.error("[Catalog] Failed to check business profile image eligibility:", error);
+      return res.status(500).json({ success: false, error: "Profile image change eligibility could not be checked." });
+    }
+  }
+);
+
 app.patch(
   "/api/catalog/vendor/:phone/profile-image",
   sessionCookieMiddleware,
   whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
   async (req, res) => {
-    if (!req.user) {
-      return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to update this image." });
-    }
-
-    const requestedPhone = normalizeWhatsAppNumber(req.params.phone);
-    const authenticatedPhones = [req.user.phone, req.user.id, req.user.vendorId]
-      .map((value) => normalizeWhatsAppNumber(value))
-      .filter(Boolean);
-    if (!requestedPhone || !authenticatedPhones.includes(requestedPhone)) {
-      return res.status(403).json({ success: false, error: "You can only update the profile image for your own business." });
-    }
+    const requestedPhone = authorizeProfileImageRequest(req, res);
+    if (!requestedPhone) return;
 
     const imageUrl = typeof req.body?.imageUrl === "string" ? req.body.imageUrl.trim() : "";
     try {
@@ -1860,41 +1959,48 @@ app.patch(
         return res.status(400).json({ success: false, error: "A valid stored business image URL is required." });
       }
 
-      const [businesses, merchants] = await Promise.all([
-        getDocs(collection(firestoreDb, "businesses")),
-        getDocs(collection(firestoreDb, "merchants"))
-      ]);
-      const matchingMerchantDocs = [...businesses.docs, ...merchants.docs].filter((merchantDoc) => {
-        const business = merchantDoc.data();
-        const merchantPhones = [
-          business.whatsappNumber,
-          business.whatsapp,
-          business.phone,
-          business.whatsapp_number
-        ]
-          .map(normalizeWhatsAppNumber)
-          .filter((phone): phone is string => Boolean(phone));
-        return merchantPhones.includes(requestedPhone);
-      });
+      const matchingMerchantDocs = await getMatchingMerchantDocs(requestedPhone);
       if (matchingMerchantDocs.length === 0) {
         return res.status(404).json({ success: false, error: "Merchant not found." });
       }
 
-      const update = {
-        avatarUrl: imageUrl,
-        avatar_url: imageUrl,
-        imageUrl,
-        profilePhotoUrl: imageUrl,
-        updatedAt: new Date().toISOString()
-      };
-      const batch = writeBatch(firestoreDb);
-      matchingMerchantDocs.forEach((merchantDoc) => {
-        batch.set(merchantDoc.ref, update, { merge: true });
-      });
-      await batch.commit();
+      const changedAt = new Date().toISOString();
+      const transactionResult = await runTransaction(firestoreDb, async (transaction) => {
+        const snapshots = await Promise.all(matchingMerchantDocs.map((merchantDoc) => transaction.get(merchantDoc.ref)));
+        const latestEligibility = snapshots
+          .map((snapshot) => getProfileImageEligibility(snapshot.data() || {}, new Date(changedAt)))
+          .sort((left, right) => (right.eligibleAt || "").localeCompare(left.eligibleAt || ""))[0];
+        if (!latestEligibility.allowed) {
+          return { allowed: false as const, eligibleAt: latestEligibility.eligibleAt };
+        }
 
-      return res.json({ success: true, imageUrl });
-    } catch (error: any) {
+        const update = {
+          avatarUrl: imageUrl,
+          avatar_url: imageUrl,
+          imageUrl,
+          profilePhotoUrl: imageUrl,
+          profileImageChangedAt: changedAt,
+          updatedAt: changedAt
+        };
+        matchingMerchantDocs.forEach((merchantDoc) => {
+          transaction.set(merchantDoc.ref, update, { merge: true });
+        });
+        return { allowed: true as const, eligibleAt: addSixCalendarMonths(new Date(changedAt)).toISOString() };
+      });
+
+      if (!transactionResult.allowed) {
+        if (!transactionResult.eligibleAt) {
+          throw new Error("Profile image cooldown date could not be determined.");
+        }
+        return res.status(429).json({
+          success: false,
+          code: "PROFILE_IMAGE_COOLDOWN",
+          eligibleAt: transactionResult.eligibleAt,
+          error: `Your profile photo can be changed again on ${new Date(transactionResult.eligibleAt).toLocaleDateString()}.`
+        });
+      }
+      return res.json({ success: true, imageUrl, eligibleAt: transactionResult.eligibleAt });
+    } catch (error) {
       if (error instanceof TypeError) {
         return res.status(400).json({ success: false, error: "A valid stored business image URL is required." });
       }
