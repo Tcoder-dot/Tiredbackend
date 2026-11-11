@@ -7,6 +7,7 @@ import { firestoreDb, EscrowOrderDoc } from './firestoreService.js';
 import { whatsappAuthService } from './whatsappAuthService.js';
 import { matchCoordinatesToNigerianMarket } from './marketGeoService.js';
 import {
+  type ParsedCommerceQuery,
   parseShoppingQuery,
   transcribeAndAnalyzeAudio,
   validateSelfieWithGeminiVision,
@@ -7281,7 +7282,11 @@ async function sendWelcomeGreeting(toPhone: string, senderName: string) {
 /**
  * 2. 10-BUSINESS SEARCH & DISCOVERY ENGINE (Spotlight Priority with Organic Fallback)
  */
-async function execute10CardSearch(toPhone: string, senderName: string, params: { queryText: string; location?: string; parsedQuery?: any }) {
+async function execute10CardSearch(toPhone: string, senderName: string, params: {
+  queryText: string;
+  location?: string;
+  parsedQuery?: ParsedCommerceQuery;
+}) {
   const { queryText, location, parsedQuery } = params;
 
   // 1. AI Parsing with Gemini
@@ -7303,7 +7308,12 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
   const targetLoc = location || parsed.targetSellerLocation || buyer.primaryLocation || 'Nigeria';
 
   const catalogProducts = await firestoreDb.getAllProducts();
-  const matchedProducts = matchCatalogProducts(catalogProducts, cleanProduct, targetLoc, 10);
+  const matchedProducts = matchCatalogProducts(catalogProducts, cleanProduct, targetLoc, 10, {
+    category: parsed.category,
+    inferredCategories: parsed.inferredCategories,
+    maxPriceNaira: parsed.maxPriceNaira,
+    itemType: parsed.itemType,
+  });
   if (matchedProducts.length > 0) {
     await firestoreDb.recordBuyerSearch(toPhone, cleanProduct, targetLoc, matchedProducts.length);
     void firestoreDb.logSearch({

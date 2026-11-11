@@ -44,6 +44,7 @@ import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch, runTransaction } from "firebase/firestore";
 import sharp from "sharp";
 import firebaseConfig from "./firebase-applet-config.json";
+import { createPortfolioPreview, normalizePortfolioUrl } from "./src/services/portfolioPreviewService";
 
 dotenv.config();
 
@@ -431,12 +432,12 @@ app.post(
 
 app.post(
   "/api/catalog/product/image",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
   express.raw({ type: () => true, limit: "8mb" }),
   async (req, res) => {
-    const expectedKey = Buffer.from(process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6");
-    const providedKey = Buffer.from(req.get("x-api-key") || "");
-    if (providedKey.length !== expectedKey.length || !timingSafeEqual(providedKey, expectedKey)) {
-      return res.status(401).json({ success: false, error: "API authentication required." });
+    if (!req.user) {
+      return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to upload a product image." });
     }
 
     if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
@@ -470,6 +471,47 @@ app.post(
       }
       console.error("[Catalog] Failed to upload product image:", error);
       return res.status(503).json({ success: false, error: error.message || "Product image storage is unavailable." });
+    }
+  }
+);
+
+app.post(
+  "/api/catalog/portfolio-preview",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to preview a portfolio website." });
+    }
+
+    let portfolioUrl: string;
+    try {
+      portfolioUrl = normalizePortfolioUrl(String(req.body?.url || ""));
+      if (!portfolioUrl) throw new Error("Enter a portfolio website URL first.");
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: error instanceof Error ? error.message : "Enter a valid HTTPS portfolio URL."
+      });
+    }
+
+    try {
+      const preview = await createPortfolioPreview(portfolioUrl, async (buffer) => {
+        const normalizedImage = await sharp(buffer)
+          .rotate()
+          .resize(1600, 1600, { fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 85, mozjpeg: true })
+          .toBuffer();
+        return uploadImageToCloudinary(normalizedImage, {
+          folder: "floate/products",
+          mimeType: "image/jpeg"
+        });
+      });
+      return res.json({ success: true, ...preview });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "The portfolio preview could not be loaded.";
+      console.warn("[Catalog] Portfolio preview unavailable:", message);
+      return res.status(502).json({ success: false, error: message });
     }
   }
 );
@@ -1124,6 +1166,18 @@ app.post("/api/catalog/product", async (req, res) => {
   const prodName = String(name || title || "").trim();
   const normalizedVendorPhone = normalizeWhatsAppNumber(vendorPhone || identifier);
   const numPrice = typeof price === "number" ? price : parseFloat(String(price || "0").replace(/[^0-9.]/g, ""));
+  let portfolioUrl = "";
+  let portfolioPreviewImageUrl = "";
+
+  try {
+    portfolioUrl = normalizePortfolioUrl(req.body.portfolioUrl);
+    portfolioPreviewImageUrl = normalizePortfolioUrl(req.body.portfolioPreviewImageUrl);
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Enter a valid HTTPS portfolio URL."
+    });
+  }
 
   if (!prodName || !normalizedVendorPhone || !Number.isFinite(numPrice) || numPrice <= 0) {
     return res.status(400).json({ success: false, error: "A product name, valid merchant WhatsApp number, and positive price are required." });
@@ -1138,7 +1192,7 @@ app.post("/api/catalog/product", async (req, res) => {
           "Accept": "application/json",
           "x-api-key": process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6"
         },
-        body: JSON.stringify(req.body)
+        body: JSON.stringify({ ...req.body, portfolioUrl, portfolioPreviewImageUrl })
       });
       if (remoteRes.ok) {
         const data = await remoteRes.json();
@@ -1205,6 +1259,8 @@ app.post("/api/catalog/product", async (req, res) => {
       photo_url: productImage,
       imageUrl: productImage,
       photos: productImage ? [productImage] : [],
+      portfolioUrl,
+      portfolioPreviewImageUrl,
       description: description || `${prodName} in stock at ${businessName}.`,
       in_stock: true,
       is_sale: false,
@@ -1251,6 +1307,118 @@ app.post("/api/catalog/product", async (req, res) => {
     return res.status(500).json({ success: false, error: "Product could not be saved to the catalog." });
   }
 });
+
+app.patch(
+  "/api/catalog/product/:id",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to update products." });
+    }
+
+    const productId = String(req.params.id || "").trim();
+    const authenticatedPhone = normalizeWhatsAppNumber(req.user.phone || req.user.id || req.user.vendorId);
+    const name = String(req.body.name || req.body.title || req.body.product || "").trim();
+    const price = typeof req.body.price === "number"
+      ? req.body.price
+      : parseFloat(String(req.body.price || "0").replace(/[^0-9.]/g, ""));
+    const acceptedConditions = ["new", "used", "refurbished"] as const;
+    const submittedCondition = typeof req.body.condition === "string"
+      ? req.body.condition.trim().toLowerCase()
+      : "";
+    const condition = acceptedConditions.find((value) => value === submittedCondition);
+    if (!productId || !authenticatedPhone || !name || !Number.isFinite(price) || price <= 0) {
+      return res.status(400).json({ success: false, error: "A product name, valid price, and authenticated merchant are required." });
+    }
+
+    let portfolioUrl = "";
+    let portfolioPreviewImageUrl = "";
+    try {
+      portfolioUrl = normalizePortfolioUrl(req.body.portfolioUrl);
+      portfolioPreviewImageUrl = normalizePortfolioUrl(req.body.portfolioPreviewImageUrl);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: error instanceof Error ? error.message : "Enter a valid HTTPS portfolio URL."
+      });
+    }
+
+    try {
+      const businesses = await getDocs(collection(firestoreDb, "businesses"));
+      const merchantDoc = businesses.docs.find((businessDoc) => {
+        const business = businessDoc.data();
+        return normalizeWhatsAppNumber(
+          business.whatsappNumber || business.whatsapp || business.phone || business.whatsapp_number
+        ) === authenticatedPhone;
+      });
+      if (!merchantDoc) {
+        return res.status(404).json({ success: false, error: "No registered merchant matches this WhatsApp session." });
+      }
+
+      const merchant = merchantDoc.data();
+      const embeddedProducts = Array.isArray(merchant.products) ? merchant.products : [];
+      const embeddedIndex = embeddedProducts.findIndex((product: any) => String(product.id || "") === productId);
+      const productSnapshot = await getDocs(collection(firestoreDb, "products"));
+      const productDoc = productSnapshot.docs.find((candidate) => {
+        const product = candidate.data();
+        return String(product.id || candidate.id) === productId;
+      });
+      const productData = productDoc?.data() || embeddedProducts[embeddedIndex];
+      if (!productData) {
+        return res.status(404).json({ success: false, error: "Product was not found for this merchant." });
+      }
+
+      const productVendor = productData.vendor && typeof productData.vendor === "object" ? productData.vendor : {};
+      const belongsToMerchant =
+        embeddedIndex >= 0 ||
+        normalizeWhatsAppNumber(
+          productData.vendorPhone || productData.whatsappNumber || productData.whatsapp ||
+          productVendor.whatsapp_number || productVendor.whatsappNumber
+        ) === authenticatedPhone ||
+        String(productData.vendorId || productData.merchantId || "") === merchantDoc.id;
+      if (!belongsToMerchant) {
+        return res.status(403).json({ success: false, error: "This product does not belong to the authenticated merchant." });
+      }
+
+      const imageUrl = Object.prototype.hasOwnProperty.call(req.body, "imageUrl")
+        ? String(req.body.imageUrl || "")
+        : String(productData.photo_url || productData.imageUrl || "");
+      const updatedProduct = {
+        ...productData,
+        title: name,
+        name,
+        product: name,
+        price_naira: price,
+        price,
+        numericPrice: price,
+        formatted_price: `₦${price.toLocaleString()}`,
+        description: String(req.body.description || ""),
+        category: String(req.body.category || "General Merchandise"),
+        ...(condition ? { condition } : {}),
+        photo_url: imageUrl,
+        imageUrl,
+        photos: imageUrl ? [imageUrl] : [],
+        portfolioUrl,
+        portfolioPreviewImageUrl
+      };
+
+      const batch = writeBatch(firestoreDb);
+      if (productDoc) batch.set(productDoc.ref, updatedProduct, { merge: true });
+      if (embeddedIndex >= 0) {
+        const updatedProducts = embeddedProducts.map((product: any, index: number) =>
+          index === embeddedIndex ? updatedProduct : product
+        );
+        batch.set(merchantDoc.ref, { products: updatedProducts }, { merge: true });
+      }
+      await batch.commit();
+      return res.json({ success: true, product: updatedProduct });
+    } catch (error) {
+      console.error("[Catalog] Failed to update product:", error);
+      return res.status(500).json({ success: false, error: "Product could not be updated." });
+    }
+  }
+);
 
 app.patch("/api/catalog/product/:id/condition", async (req, res) => {
   const productId = String(req.params.id || "").trim();
