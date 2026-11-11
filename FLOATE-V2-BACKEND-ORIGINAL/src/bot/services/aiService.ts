@@ -337,6 +337,8 @@ export function isSponsorOrPromoteIntent(rawInput: string): boolean {
   const text = rawInput.trim();
   const lower = text.toLowerCase().replace(/[^a-z0-9 _]+/g, ' ').replace(/\s+/g, ' ').trim();
 
+  if (isBusinessAdsRequest(text)) return true;
+
   // Fast explicit tokens
   if (
     text === 'btn_vendor_sponsor' ||
@@ -352,6 +354,16 @@ export function isSponsorOrPromoteIntent(rawInput: string): boolean {
     /\b(how\s+(?:do\s+i|can\s+i|to)\s+(?:sponsor|promote|advertise|boost)\s+(?:my\s+|our\s+)?(?:products?|items?|store|shop|goods))\b/i.test(lower) ||
     /\b(sponsor(?:ing)?\s+(?:my|our|this|the)?\s*(?:products?|items?|business|store|shop))\b/i.test(lower) ||
     /\b(push\s+(?:my|our)\s+market|blow\s+(?:my|our)\s+business|show\s+(?:my|our)\s+(?:items?|market|products?)\s+for\s+front|sponsor\s+my\s+products?|promote\s+my\s+products?|advertise\s+my\s+products?)\b/i.test(lower)
+  );
+}
+
+export function isBusinessAdsRequest(rawInput: string): boolean {
+  if (!rawInput) return false;
+  const lower = rawInput.toLowerCase().replace(/[^a-z0-9 _]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return (
+    /\b(?:run|place|start|launch|book|buy)\s+(?:some\s+|an?\s+)?ads?\s+(?:for|on)\s+(?:my|our|the)\s+(?:business|store|shop|company|brand)\b/i.test(lower) ||
+    /\b(?:i\s+(?:want|would\s+like|need)\s+to\s+)?advertise\s+(?:my|our)\s+(?:business|store|shop|company|brand)\b/i.test(lower) ||
+    /\b(?:ads?|advertising)\s+(?:for|on)\s+(?:my|our)\s+(?:business|store|shop|company|brand)\b/i.test(lower)
   );
 }
 
@@ -503,8 +515,8 @@ export async function classifyInboundIntent(rawInput: string): Promise<InboundCl
   // Fast Merchant Stats check
   if (
     text === 'btn_vendor_stats' ||
-    /^(?:stats|my\s+stats|mystats|view\s+stats|business\s+stats|my\s+business\s+stats|store\s+stats|my\s+store\s+stats|analytics|my\s+analytics|store\s+analytics|business\s+analytics|performance|store\s+performance|business\s+performance)$/i.test(lower) ||
-    /\b(my\s+business\s+stats|my\s+store\s+stats|view\s+my\s+stats|show\s+my\s+stats|how\s+many\s+searches)\b/i.test(lower)
+    /^(?:stats|my\s+stats|mystats|view\s+stats|business\s+stats|my\s+business\s+stats|store\s+stats|my\s+store\s+stats|analytics|my\s+analytics|store\s+analytics|business\s+analytics|performance|store\s+performance|business\s+performance|merchant\s+update|my\s+merchant\s+update|store\s+update|my\s+store\s+update|shop\s+update|my\s+shop\s+update|business\s+update|my\s+business\s+update)$/i.test(lower) ||
+    /\b(my\s+business\s+stats|my\s+store\s+stats|view\s+my\s+stats|show\s+my\s+stats|how\s+many\s+searches|(?:merchant|store|shop|business)\s+update)\b/i.test(lower)
   ) {
     return { intent: 'MERCHANT_STATS', confidence: 1.0, rawText: text };
   }

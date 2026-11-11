@@ -15,6 +15,7 @@ import {
   verifyLivenessVideoWithGemini,
   classifyInboundIntent,
   isBusinessRegistrationPhrase,
+  isBusinessAdsRequest,
   extractRegistrationHints,
   parseNaturalLanguageSafePayDeal,
   NaturalLanguageSafePayDeal,
@@ -68,6 +69,7 @@ import { getDeployedFlowIds, handleFlowSubmission } from './whatsappFlowService.
 import { resolveCredential } from './credentialAssetRenderer.js';
 import { createCredentialForMerchant } from './credentialService.js';
 import { monetizationService } from './monetizationService.js';
+import { listAds } from './adminAdStore.js';
 
 export function parseNumericAmount(priceStr?: string): number {
   if (!priceStr) return 5000;
@@ -1187,6 +1189,7 @@ export async function handleWhatsAppWebhook(req: express.Request, res: express.R
             console.error(`[WhatsApp Engine Error] +${senderPhone}:`, err);
           });
         }
+
       }
     }
   } catch (err: any) {
@@ -5577,7 +5580,7 @@ export async function processMasterWhatsAppEngine(params: {
       } else if (pendingClassification.intent === 'MERCHANT_EDIT_CATALOG') {
         await startVendorEditProducts(cleanPhone, senderName);
       } else if (pendingClassification.intent === 'MERCHANT_SPONSOR_PRODUCTS') {
-        await handleVendorSponsorInquiry(cleanPhone, senderName);
+        await handleVendorSponsorInquiry(cleanPhone, senderName, pendingSearch);
       } else if (pendingClassification.intent === 'REFERRAL_PROGRAM') {
         await handleVendorReferralHub(cleanPhone, senderName);
       } else if (pendingClassification.intent === 'BROWSE_MARKETS') {
@@ -5768,7 +5771,7 @@ export async function processMasterWhatsAppEngine(params: {
       } else if (pendingClassification.intent === 'MERCHANT_EDIT_CATALOG') {
         await startVendorEditProducts(cleanPhone, senderName);
       } else if (pendingClassification.intent === 'MERCHANT_SPONSOR_PRODUCTS') {
-        await handleVendorSponsorInquiry(cleanPhone, senderName);
+        await handleVendorSponsorInquiry(cleanPhone, senderName, pendingSearch);
       } else if (pendingClassification.intent === 'REFERRAL_PROGRAM') {
         await handleVendorReferralHub(cleanPhone, senderName);
       } else if (pendingClassification.intent === 'BROWSE_MARKETS') {
@@ -6286,51 +6289,14 @@ export async function processMasterWhatsAppEngine(params: {
     return;
   }
 
-  // Buy Single Boost (₦1,000)
+  // Legacy boost purchase buttons now open the current product-specific checkout flow.
   if (text === 'btn_boost_buy_single') {
-    const checkout = await monetizationService.initiateTierCheckout({
-      merchantPhone: cleanPhone,
-      packageId: 'PRODUCT_BOOST_SINGLE',
-      customerName: senderName,
-    }).catch(() => null);
-    if (checkout?.checkoutUrl) {
-      await sendWhatsAppMessage(
-        cleanPhone,
-        `💳 *1-Week Product Boost (₦1,000)* 🚀\n\n` +
-        `Tap the secure link below to activate your 7-day category top placement:\n${checkout.checkoutUrl}\n\n` +
-        `_Once payment is completed, your boost is activated immediately!_`,
-        {
-          quickReplies: [
-            { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
-            { id: 'btn_vendor_stats', title: '📊 My Stats' },
-          ],
-        }
-      );
-    }
+    await handleVendorBoostProduct(cleanPhone, senderName);
     return;
   }
 
-  // Buy 5-Boost Bundle (₦4,000)
   if (text === 'btn_boost_buy_bundle') {
-    const checkout = await monetizationService.initiateTierCheckout({
-      merchantPhone: cleanPhone,
-      packageId: 'PRODUCT_BOOST_BUNDLE_5',
-      customerName: senderName,
-    }).catch(() => null);
-    if (checkout?.checkoutUrl) {
-      await sendWhatsAppMessage(
-        cleanPhone,
-        `⚡ *5-Boost Bundle Pack (₦4,000 - Save ₦1,000!)* 🚀\n\n` +
-        `Tap the secure link below to purchase your 5 boosts:\n${checkout.checkoutUrl}\n\n` +
-        `_Boosts never expire and can be applied to any products in your catalog!_`,
-        {
-          quickReplies: [
-            { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
-            { id: 'btn_vendor_stats', title: '📊 My Stats' },
-          ],
-        }
-      );
-    }
+    await handleVendorBoostProduct(cleanPhone, senderName);
     return;
   }
 
@@ -6377,7 +6343,7 @@ export async function processMasterWhatsAppEngine(params: {
     text === 'btn_promote_product' ||
     isSponsorOrPromoteIntent(text)
   ) {
-    await handleVendorSponsorInquiry(cleanPhone, senderName);
+    await handleVendorSponsorInquiry(cleanPhone, senderName, text);
     return;
   }
 
@@ -6759,7 +6725,7 @@ export async function processMasterWhatsAppEngine(params: {
 
   if (classification.intent === 'MERCHANT_SPONSOR_PRODUCTS') {
     console.log(`[WhatsApp Inbound] 🚀 Routing to: handleVendorSponsorInquiry (MERCHANT_SPONSOR_PRODUCTS)`);
-    await handleVendorSponsorInquiry(cleanPhone, senderName);
+    await handleVendorSponsorInquiry(cleanPhone, senderName, classification.rawText);
     return;
   }
 
@@ -8319,30 +8285,76 @@ async function handleVendorHubRouting(toPhone: string, senderName: string) {
  * 5a. Performance & Stats
  */
 async function handleVendorStats(toPhone: string, senderName: string) {
-  const merchant = (await firestoreDb.getMerchant(toPhone)) || sheetsDb.getListingByPhone(toPhone);
-  const bizName = merchant?.businessName || 'Your Business';
-  const stats = await firestoreDb.getMerchantStats(toPhone);
-  const cred = await resolveCredential(toPhone);
-  const fidCode = cred?.fid || (merchant as any)?.fid || 'FLT-VERIFIED';
-  const boostCredits = typeof (merchant as any)?.boostCredits === 'number' ? (merchant as any).boostCredits : 0;
-  const isPlus = (merchant as any)?.tier === 'VERIFIED_PLUS' || (merchant as any)?.isVerifiedPlus;
+  const merchantPhone = normalizePhone(toPhone);
+  const merchant = (await firestoreDb.getMerchant(merchantPhone)) || sheetsDb.getListingByPhone(merchantPhone);
+  if (!merchant) {
+    await sendWhatsAppMessage(toPhone, `I couldn't find a merchant account linked to this WhatsApp number. Open the Merchant Hub to register or sign in.`);
+    return;
+  }
+
+  const bizName = merchant.businessName || 'Your Business';
+  const stats = await firestoreDb.getMerchantStats(merchantPhone);
+  const status = String((merchant as any).status || '').toUpperCase();
+  const verificationStatus = String((merchant as any).verificationStatus || (merchant as any).verifiedStatus || '').toUpperCase();
+  const isVerified = stats.isVerified || verificationStatus === 'APPROVED' || verificationStatus === 'YES';
+  let accountStatus = verificationStatus || status || 'Status unavailable';
+  if (status === 'REJECTED' || verificationStatus === 'REJECTED') {
+    accountStatus = 'Rejected';
+  } else if (status === 'PENDING_REVIEW' || verificationStatus === 'PENDING_REVIEW' || verificationStatus === 'PENDING') {
+    accountStatus = 'Pending review';
+  } else if (status === 'INACTIVE') {
+    accountStatus = 'Inactive';
+  } else if (status === 'ACTIVE') {
+    accountStatus = isVerified ? 'Verified and active' : 'Active';
+  } else if (isVerified) {
+    accountStatus = 'Verified';
+  }
+
+  let merchantAds: Array<{ status: string; impressions: number; purchasedViews: number }> = [];
+  let adMetricsUnavailable = false;
+  try {
+    const ads = await listAds();
+    merchantAds = ads
+      .filter((ad) =>
+        ad.submittedVia === 'MERCHANT_PAID' &&
+        Boolean(ad.merchantPhone) &&
+        normalizePhone(String(ad.merchantPhone)) === merchantPhone
+      )
+      .map((ad) => ({
+        status: String(ad.status || 'UNKNOWN').replace(/_/g, ' '),
+        impressions: Number(ad.impressions || 0),
+        purchasedViews: Number(ad.purchasedViews || 0),
+      }));
+  } catch (error) {
+    adMetricsUnavailable = true;
+    console.error('[WhatsApp Merchant Stats] Failed to load paid ad metrics:', error);
+  }
+
+  const adSummary = adMetricsUnavailable
+    ? `• Paid ad metrics: *temporarily unavailable*\n`
+    : merchantAds.length === 0
+      ? `• Paid ads: *No campaigns found*\n`
+      : `• Paid campaigns: *${merchantAds.length}*\n` +
+        merchantAds.slice(0, 3).map((ad) =>
+          `  – ${ad.status}: *${ad.impressions.toLocaleString()}* views${ad.purchasedViews > 0 ? ` / ${ad.purchasedViews.toLocaleString()} purchased` : ''}`
+        ).join('\n') +
+        (merchantAds.length > 3 ? `\n  – Plus ${merchantAds.length - 3} more campaign(s)` : '') +
+        '\n';
 
   const statsMsg =
     `*Merchant Performance & Analytics* 📊\n` +
     `─────────────────────────\n` +
     `Store: *${bizName}*\n` +
-    `Status: ${isPlus ? '⭐ Verified Plus Merchant' : '🛡️ Verified Physical Stall'} (${fidCode})\n` +
+    `Account status: *${accountStatus}*\n` +
     `Listed Since: ${stats.registeredSince}\n\n` +
     `*Key Metrics:*\n` +
-    `• Search Views: *${stats.appearances}* views in Floate discovery\n` +
-    `• Views in the last 7 days: *${stats.last7DaysAppearances}*\n` +
-    `• Direct Customer Inquiries: *${stats.leadsGenerated}* connected buyers\n` +
-    `• Active Listed Items: *${stats.productCount}* products\n` +
-    `• Available Product Boosts: *${boostCredits}* boosts\n` +
-    `• Inquiry Lead Fee: *₦0 (100% Free & Unlimited)* ⚡\n` +
-    `• SafePay Escrow: *Active for protected orders*\n` +
+    `• Search Views: *${stats.appearancesAvailable ? stats.appearances.toLocaleString() : 'Unavailable'}* views in Floate discovery\n` +
+    `• Views in the last 7 days: *${stats.appearancesAvailable ? stats.last7DaysAppearances.toLocaleString() : 'Unavailable'}*\n` +
+    `• Buyer connections: *${stats.leadsGeneratedAvailable ? stats.leadsGenerated.toLocaleString() : 'Unavailable'}* customer inquiries\n` +
+    `• Listed Products: *${stats.productCount}*\n` +
+    adSummary +
     `─────────────────────────\n` +
-    `Direct buyer inquiries on WhatsApp are 100% free with 0% commission.`;
+    `Use the Merchant Hub to manage products and product boosts.`;
 
   updateWhatsAppSession(toPhone, { state: 'VENDOR_PORTAL' });
 
@@ -9178,7 +9190,41 @@ async function handleVendorTopupPaymentVerification(
 /**
  * 5-Sponsor. Vendor Product Sponsorship & Spotlight Inquiry Flow
  */
-async function handleVendorSponsorInquiry(cleanPhone: string, senderName: string): Promise<void> {
+async function createMerchantDashboardActionUrl(
+  merchantPhone: string,
+  merchant: { id?: string | number },
+  action: 'add-product' | 'boost-product'
+): Promise<string> {
+  const storefrontToken = await whatsappAuthService.generateStorefrontToken(
+    merchantPhone,
+    String(merchant.id || merchantPhone)
+  );
+  const dashboardUrl = new URL(`${getFrontendWebUrl().replace(/\/+$/, '')}/merchant/dashboard`);
+  dashboardUrl.searchParams.set('wa_token', storefrontToken.wa_token);
+  dashboardUrl.searchParams.set('redirect', `/merchant/dashboard?action=${action}`);
+  return dashboardUrl.toString();
+}
+
+async function handleVendorSponsorInquiry(cleanPhone: string, senderName: string, messageText = ''): Promise<void> {
+  if (isBusinessAdsRequest(messageText)) {
+    const merchant = (await firestoreDb.getMerchant(cleanPhone)) || sheetsDb.getListingByPhone(cleanPhone);
+    const displayName = merchant?.businessName ? ` Business: ${merchant.businessName}.` : '';
+    const supportUrl = `https://wa.me/2347065599116?text=${encodeURIComponent(`I want to run ads for my business on Floate.${displayName}`)}`;
+    await sendWhatsAppMessage(
+      cleanPhone,
+      `📣 *Advertise your business on Floate*\n\n` +
+      `Chat with our ads support team to discuss your campaign and placement. Tap below and your message will be ready to send.`,
+      {
+        ctaUrl: {
+          displayText: 'Contact Ads Support',
+          url: supportUrl,
+          headerText: 'Business Ads',
+        },
+      }
+    );
+    return;
+  }
+
   const merchant = (await firestoreDb.getMerchant(cleanPhone)) || sheetsDb.getListingByPhone(cleanPhone);
   const isRegistered = Boolean(
     merchant &&
@@ -9189,28 +9235,16 @@ async function handleVendorSponsorInquiry(cleanPhone: string, senderName: string
   const displayName = merchant?.businessName || (senderName && senderName !== 'Customer' ? senderName.trim() : '');
 
   if (isRegistered) {
-    const boostCredits = typeof (merchant as any)?.boostCredits === 'number' ? (merchant as any).boostCredits : 0;
-
     const sponsorMsg =
       `🌟 *Floate Product Boost & Search Spotlight* 🚀\n` +
       `━━━━━━━━━━━━━━━━━━━━━━\n` +
       `Hello ${displayName ? `*${displayName}*` : 'Store Owner'}! Welcome to Floate's Product Promotion Hub.\n\n` +
-      `Want your items to appear at the very top when shoppers search your market or category?\n\n` +
-      `✨ *How Product Boosts Work:*\n` +
-      `• *Top Search Placement:* Your product is pinned to the top of category search results for 7 full days.\n` +
-      `• *Verified Trust Badge:* Gold badge showing buyers your physical stall is verified.\n` +
-      `• *Direct Inquiries:* Shoppers connect straight to your WhatsApp with 0% commission.\n\n` +
-      `📊 *Your Status:*\n` +
-      `• Available Boost Credits: *${boostCredits}* boosts\n\n` +
-      `💡 *Promotion Options:*\n` +
-      `• *1-Week Product Boost:* ₦1,000 (Launch rate)\n` +
-      `• *5-Boost Bundle Pack:* ₦4,000 (Save ₦1,000)\n` +
-      `• *⭐ Verified Plus (Founding Merchant):* ₦5,000 / year (Includes 3 free boosts + +25 search ranking + official certificate)`;
+      `Boost a product to place it in Floate search results for your chosen duration. Product boosts cost *₦2,000 per 7 days*.\n\n` +
+      `Open the Merchant Dashboard to choose a product and complete secure checkout.`;
 
     await sendWhatsAppMessage(cleanPhone, sponsorMsg, {
       quickReplies: [
         { id: 'btn_boost_product', title: '🚀 Boost Product' },
-        { id: 'btn_upgrade_verified_plus', title: '⭐ Verified Plus' },
         { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
       ],
     });
@@ -9242,54 +9276,38 @@ async function handleVendorSponsorInquiry(cleanPhone: string, senderName: string
  */
 async function handleVendorBoostProduct(cleanPhone: string, senderName: string): Promise<void> {
   const merchant = (await firestoreDb.getMerchant(cleanPhone)) || sheetsDb.getListingByPhone(cleanPhone);
-  const products = await firestoreDb.getProductsByMerchant(cleanPhone);
-  const boostCredits = typeof (merchant as any)?.boostCredits === 'number' ? (merchant as any).boostCredits : 0;
-
-  if (boostCredits > 0 && products && products.length > 0) {
-    let msg = `🚀 *You Have ${boostCredits} Boost Credit${boostCredits === 1 ? '' : 's'} Available!*\n\n`;
-    msg += `Select a product below to pin it to the top of category search results for 7 days:\n\n`;
-    products.slice(0, 5).forEach((p, idx) => {
-      const isCurrentlyBoosted = (p as any)?.isBoosted;
-      msg += `${idx + 1}️⃣ *${p.product}* (${p.price || 'Price on request'})${isCurrentlyBoosted ? ' ⚡ (Already Boosted)' : ''}\n`;
-    });
-    msg += `\nReply with the product number (e.g. *1*) or tap an option below:`;
-
-    const productRows = products.slice(0, 5).map((p, idx) => ({
-      id: `btn_activate_boost_${p.id || idx}`,
-      title: `${idx + 1}. ${p.product}`.slice(0, 24),
-      description: `Boost for 7 days (${p.price || 'Contact'})`.slice(0, 72),
-    }));
-
-    await sendWhatsAppMessage(cleanPhone, msg, {
-      listMenu: {
-        buttonText: '🚀 Select Product to Boost',
-        title: 'Available Products',
-        sections: [
-          {
-            title: 'Your Catalog',
-            rows: productRows,
-          },
-        ],
-      },
-      quickReplies: [
-        { id: 'btn_boost_buy_single', title: '💳 Buy 1 Boost (₦1k)' },
-        { id: 'btn_boost_buy_bundle', title: '⚡ 5-Boost Pack (₦4k)' },
-        { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
-      ],
-    });
+  if (!merchant) {
+    const registerUrl = buildRegisterUrl({ phone: normalizePhone(cleanPhone) });
+    await sendWhatsAppMessage(cleanPhone, `Register your FLOATE merchant profile before boosting a product:\n${registerUrl}`);
     return;
   }
 
-  // No active boost credits or no products
+  const products = await firestoreDb.getProductsByMerchant(cleanPhone);
   if (!products || products.length === 0) {
+    await startVendorAddProduct(cleanPhone, senderName);
+    return;
+  }
+
+  const boostCredits = typeof (merchant as any).boostCredits === 'number' ? (merchant as any).boostCredits : 0;
+  const dashboardUrl = await createMerchantDashboardActionUrl(cleanPhone, merchant, 'boost-product');
+  if (boostCredits > 0) {
+    const productRows = products.slice(0, 5).map((product, index) => ({
+      id: `btn_activate_boost_${product.id || index}`,
+      title: `${index + 1}. ${product.product}`.slice(0, 24),
+      description: `Apply one of your ${boostCredits} available credits`.slice(0, 72),
+    }));
     await sendWhatsAppMessage(
       cleanPhone,
-      `🚀 *Floate Product Boost*\n─────────────────────────\n` +
-      `You need to list at least one product before boosting!\n\n` +
-      `Tap *Add Product* to list your item now:`,
+      `🚀 *You have ${boostCredits} product boost credit${boostCredits === 1 ? '' : 's'} available.*\n\n` +
+      `Choose a product to apply a 7-day credit, or use the dashboard link for a paid boost at ₦2,000 per 7 days:\n${dashboardUrl}`,
       {
+        listMenu: {
+          buttonText: 'Choose a product',
+          title: 'Apply a boost credit',
+          sections: [{ title: 'Your Products', rows: productRows }],
+        },
         quickReplies: [
-          { id: 'btn_vendor_add_product', title: '➕ Add Product' },
+          { id: 'btn_vendor_stats', title: '📊 My Stats' },
           { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
         ],
       }
@@ -9297,36 +9315,16 @@ async function handleVendorBoostProduct(cleanPhone: string, senderName: string):
     return;
   }
 
-  // Has products but 0 boost credits
-  const checkout = await monetizationService.initiateTierCheckout({
-    merchantPhone: cleanPhone,
-    packageId: 'PRODUCT_BOOST_SINGLE',
-    customerName: senderName,
-  }).catch(() => null);
-
-  const bundleCheckout = await monetizationService.initiateTierCheckout({
-    merchantPhone: cleanPhone,
-    packageId: 'PRODUCT_BOOST_BUNDLE_5',
-    customerName: senderName,
-  }).catch(() => null);
-
   const boostMsg =
     `🚀 *Boost Your Products on Floate*\n` +
     `─────────────────────────\n` +
-    `Pin your products to the top of category search results and get 5x more buyer inquiries directly on WhatsApp!\n\n` +
-    `🔥 *Launch Special Pricing:*\n` +
-    `• *1 Product Boost (7 Days):* ₦1,000 (Regular: ₦1,500)\n` +
-    `• *5-Boost Bundle Pack:* ₦4,000 (Save ₦1,000!)\n` +
-    `• *Verified Plus Tier:* ₦5,000 / year (Includes 3 free boosts + verification certificate)\n\n` +
-    (checkout?.checkoutUrl ? `💳 *Instant Payment Link (1-Week Boost):*\n${checkout.checkoutUrl}\n\n` : '') +
-    (bundleCheckout?.checkoutUrl ? `⚡ *5-Boost Pack Link:*\n${bundleCheckout.checkoutUrl}\n\n` : '') +
-    `Choose a package below to activate:`;
+    `Choose a product and boost duration in your Merchant Dashboard. Product boosts cost *₦2,000 per 7 days* and are paid through secure checkout.\n\n` +
+    `👉 Open your product boost page:\n${dashboardUrl}`;
 
   await sendWhatsAppMessage(cleanPhone, boostMsg, {
     quickReplies: [
-      { id: 'btn_boost_buy_single', title: '💳 1 Boost (₦1,000)' },
-      { id: 'btn_boost_buy_bundle', title: '⚡ 5-Boost Pack (₦4,000)' },
-      { id: 'btn_upgrade_verified_plus', title: '⭐ Verified Plus' },
+      { id: 'btn_vendor_stats', title: '📊 My Stats' },
+      { id: 'btn_for_businesses', title: '🏪 Merchant Hub' },
     ],
   });
 }
@@ -9406,7 +9404,6 @@ async function startVendorAddProduct(toPhone: string, senderName: string): Promi
   const canonicalPhone = cleanPhone.startsWith('0') ? `234${cleanPhone.slice(1)}` : cleanPhone;
   const merchant = (await firestoreDb.getMerchant(canonicalPhone)) || sheetsDb.getListingByPhone(canonicalPhone);
   const bizName = merchant?.businessName || 'Your Business';
-  const baseUrl = getFrontendWebUrl();
   if (!merchant) {
     const registerUrl = buildRegisterUrl({ phone: canonicalPhone });
     await sendWhatsAppMessage(
@@ -9416,14 +9413,7 @@ async function startVendorAddProduct(toPhone: string, senderName: string): Promi
     return;
   }
 
-  const storefrontToken = await whatsappAuthService.generateStorefrontToken(
-    canonicalPhone,
-    String(merchant.id || canonicalPhone)
-  );
-  const dashboardUrl = new URL(`${baseUrl.replace(/\/+$/, '')}/merchant/dashboard`);
-  dashboardUrl.searchParams.set('wa_token', storefrontToken.wa_token);
-  dashboardUrl.searchParams.set('redirect', '/merchant/dashboard?action=add-product');
-  const addProductUrl = dashboardUrl.toString();
+  const addProductUrl = await createMerchantDashboardActionUrl(canonicalPhone, merchant, 'add-product');
 
   const addMsg =
     `🛍️ *Add Products to Your Storefront* 📦\n` +

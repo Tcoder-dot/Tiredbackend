@@ -2788,8 +2788,10 @@ export class FirestoreService {
    */
   public async getMerchantStats(merchantIdOrPhone: string): Promise<{
     appearances: number;
+    appearancesAvailable: boolean;
     last7DaysAppearances: number;
     leadsGenerated: number;
+    leadsGeneratedAvailable: boolean;
     productCount: number;
     balance: number;
     registeredSince: string;
@@ -2810,6 +2812,8 @@ export class FirestoreService {
     let leadsCount = 0;
     let appearancesCount = 0;
     let recentAppearancesCount = 0;
+    let leadsAvailable = true;
+    let appearancesAvailable = true;
     try {
       const leadsCol = collection(db, 'leads');
       const lSnap = await getDocs(query(leadsCol));
@@ -2823,6 +2827,7 @@ export class FirestoreService {
         }
       }
     } catch (e) {
+      leadsAvailable = false;
       console.warn('[Firestore] Notice fetching lead count:', e);
     }
 
@@ -2838,13 +2843,16 @@ export class FirestoreService {
         if (!Number.isNaN(timestamp) && timestamp >= sevenDaysAgo) recentAppearancesCount++;
       }
     } catch (e) {
+      appearancesAvailable = false;
       console.warn('[Firestore] Notice fetching merchant search appearances:', e);
     }
 
     return {
       appearances: appearancesCount,
+      appearancesAvailable,
       last7DaysAppearances: recentAppearancesCount,
       leadsGenerated: leadsCount,
+      leadsGeneratedAvailable: leadsAvailable,
       productCount: products.length,
       balance: merchant?.credit_balance ?? 0,
       registeredSince: merchant?.registeredAt || merchant?.claimDate || 'Unknown',
