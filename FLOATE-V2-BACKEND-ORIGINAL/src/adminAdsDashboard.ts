@@ -5,7 +5,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
   <meta name="referrer" content="same-origin">
-  <title>FLOATE Ads Admin</title>
+  <title>FLOATE Backend Admin</title>
   <style>
     :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #17211b; background: #f5f7f4; }
     * { box-sizing: border-box; }
@@ -49,6 +49,9 @@ export const adminAdsDashboardHtml = `<!doctype html>
     .data-row p { margin: 5px 0 0; color: #607066; font-size: 12px; }
     .toolbar { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
     .toolbar label { min-width: 180px; }
+    .section-nav { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 18px; }
+    .section-nav a { border-radius: 8px; background: #e9f0e9; color: #234629; padding: 9px 12px; font-size: 13px; font-weight: 700; text-decoration: none; }
+    .section-nav a:hover { background: #dce9dc; }
     .stat-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
     .stat-card { background: #f5f8f4; border-radius: 10px; padding: 16px; }
     .stat-card strong { display: block; font-size: 26px; color: #14531b; }
@@ -60,28 +63,44 @@ export const adminAdsDashboardHtml = `<!doctype html>
     .badge { display: inline-block; font-size: 11px; font-weight: 800; border-radius: 99px; padding: 3px 8px; background: #e7f5e9; color: #17662a; }
     .badge.PAUSED, .badge.DRAFT, .badge.PENDING_REVIEW, .badge.PENDING_DESIGN { background: #fff3d6; color: #855b00; }
     .badge.EXPIRED { background: #f0f0f0; color: #555; }
+    .badge.REJECTED { background: #fee4e2; color: #b42318; }
+    .application { padding: 16px 0; border-top: 1px solid #e6ece6; }
+    .application-head { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+    .application h3 { margin: 0; font-size: 15px; }
+    .application p { margin: 5px 0 0; color: #607066; font-size: 13px; }
+    .application details { margin-top: 12px; }
+    .application summary { cursor: pointer; color: #14531b; font-size: 13px; font-weight: 700; }
+    .application pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: #f5f8f4; border-radius: 8px; font-size: 12px; }
+    .evidence-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .evidence-images img { max-width: 180px; max-height: 140px; object-fit: contain; border: 1px solid #dfe7df; border-radius: 8px; }
     [hidden] { display: none !important; }
     @media (max-width: 620px) { .grid, .stat-grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } .campaign { grid-template-columns: 88px 1fr; gap: 10px; } .campaign img { width: 88px; } .image-preview { width: min(100%, 300px); } }
   </style>
 </head>
 <body>
   <header>
-    <div><h1>FLOATE · Ads Admin</h1><p>Manage sponsored banner campaigns</p></div>
+    <div><h1>FLOATE · Backend Admin</h1><p>Manage campaigns, business verification, and marketplace activity</p></div>
     <button id="logout" class="secondary" hidden>Lock dashboard</button>
   </header>
   <main>
     <section id="login" class="panel auth">
       <h2>Admin access</h2>
-      <p class="muted">Enter the backend admin API key to manage ads.</p>
+      <p class="muted">Enter the backend admin API key to access admin tools.</p>
       <form id="login-form">
         <label>Admin API key<input id="admin-key" type="password" autocomplete="current-password" required></label>
-        <div class="actions"><button type="submit">Unlock ads dashboard</button></div>
+        <div class="actions"><button type="submit">Unlock admin dashboard</button></div>
       </form>
       <p id="login-status" class="status" role="status"></p>
     </section>
 
     <section id="dashboard" hidden>
-      <section class="panel">
+      <nav class="section-nav" aria-label="Backend admin sections">
+        <a href="#campaign-form-section">Ads management</a>
+        <a href="#business-verifications-section">Business verification</a>
+        <a href="#promotion-requests-section">Promotion requests</a>
+        <a href="#marketplace-performance-section">Marketplace performance</a>
+      </nav>
+      <section id="campaign-form-section" class="panel">
         <h2 id="form-title">Create campaign</h2>
         <form id="campaign-form">
           <div class="grid">
@@ -113,14 +132,25 @@ export const adminAdsDashboardHtml = `<!doctype html>
         <div class="campaigns-head"><div><h2>Campaigns</h2><p id="campaign-count" class="muted"></p></div><button id="refresh" class="secondary" type="button">Refresh</button></div>
         <div id="campaign-list" class="muted">Loading campaigns…</div>
       </section>
-      <section class="panel campaigns">
+      <section id="business-verifications-section" class="panel campaigns">
+        <div class="campaigns-head">
+          <div><h2>Business verification</h2><p id="verification-count" class="muted">Review new business registrations and their submitted information.</p></div>
+          <button id="refresh-verifications" class="secondary" type="button">Refresh applications</button>
+        </div>
+        <div class="toolbar">
+          <label>Application status<select id="verification-status-filter"><option value="pending_review">Pending review</option><option value="all">All applications</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select></label>
+        </div>
+        <p id="verification-status" class="status" role="status"></p>
+        <div id="verification-list" class="muted">Loading business applications…</div>
+      </section>
+      <section id="promotion-requests-section" class="panel campaigns">
         <div class="campaigns-head"><div><h2>Merchant promotion requests</h2><p class="muted">Checkout requests and confirmed payments for product boosts and business ads.</p></div></div>
         <div class="toolbar">
           <label>Payment status<select id="boost-status-filter"><option value="ALL">All requests</option><option value="PAID">Paid</option><option value="PAYMENT_PENDING">Awaiting payment</option></select></label>
         </div>
         <div id="boost-request-list" class="muted">Loading promotion requests…</div>
       </section>
-      <section class="panel campaigns">
+      <section id="marketplace-performance-section" class="panel campaigns">
         <div class="campaigns-head"><div><h2>Marketplace performance</h2><p class="muted">Live counts from registered merchants, buyer searches, and WhatsApp inquiry connections.</p></div><button id="refresh-metrics" class="secondary" type="button">Refresh metrics</button></div>
         <div class="toolbar">
           <label>Location<select id="metrics-location"><option value="">All locations</option></select></label>
@@ -144,6 +174,9 @@ export const adminAdsDashboardHtml = `<!doctype html>
       const form = document.getElementById("campaign-form");
       const list = document.getElementById("campaign-list");
       const boostList = document.getElementById("boost-request-list");
+      const verificationList = document.getElementById("verification-list");
+      const verificationStatus = document.getElementById("verification-status");
+      const verificationStatusFilter = document.getElementById("verification-status-filter");
       const metricsTotals = document.getElementById("metrics-totals");
       const leaderboard = document.getElementById("merchant-leaderboard");
       const locationFilter = document.getElementById("metrics-location");
@@ -155,6 +188,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
       let currentImageUrl = "";
       let campaigns = [];
       let boostRequests = [];
+      let verificationApplications = [];
       let pollingTimer = null;
       const imageInput = document.getElementById("banner-image");
       const imagePreview = document.getElementById("image-preview");
@@ -181,7 +215,7 @@ export const adminAdsDashboardHtml = `<!doctype html>
         const result = await response.json().catch(() => ({}));
         if (!response.ok || !result.success) {
           if (response.status === 401) lock();
-          throw new Error(result.error || "Request failed (" + response.status + ").");
+          throw new Error(result.error || result.message || "Request failed (" + response.status + ").");
         }
         return result;
       };
@@ -431,10 +465,196 @@ export const adminAdsDashboardHtml = `<!doctype html>
           leaderboard.textContent = error.message || "Unable to load marketplace metrics.";
         }
       };
+      const collectEvidenceImages = (value, fieldName = "", images = []) => {
+        if (images.length >= 8 || value == null) return images;
+        if (typeof value === "string" && /(image|photo|selfie|avatar|evidence)/i.test(fieldName)) {
+          if (/^data:image\\//i.test(value) || /^https?:\\/\\//i.test(value)) {
+            images.push(value);
+          } else if (value.length > 100 && /^[A-Za-z0-9+/=]+$/.test(value)) {
+            images.push("data:image/jpeg;base64," + value);
+          }
+          return images;
+        }
+        if (Array.isArray(value)) {
+          value.forEach((item) => collectEvidenceImages(item, fieldName, images));
+        } else if (typeof value === "object") {
+          Object.entries(value).forEach(([key, item]) => collectEvidenceImages(item, key, images));
+        }
+        return images;
+      };
+      const renderVerifications = () => {
+        verificationList.replaceChildren();
+        const statusFilter = verificationStatusFilter.value;
+        const visible = verificationApplications.filter((application) =>
+          statusFilter === "all" || application.status === statusFilter
+        );
+        document.getElementById("verification-count").textContent =
+          verificationApplications.length + " application" + (verificationApplications.length === 1 ? "" : "s") +
+          " · " + verificationApplications.filter((application) => application.status === "pending_review").length + " pending review";
+        if (!visible.length) {
+          verificationList.textContent = "No business applications match this status.";
+          return;
+        }
+
+        for (const application of visible) {
+          const row = document.createElement("article");
+          row.className = "application";
+          const heading = document.createElement("div");
+          heading.className = "application-head";
+          const identity = document.createElement("div");
+          const name = document.createElement("h3");
+          name.textContent = application.business_name || application.businessName || "Business application";
+          const owner = document.createElement("p");
+          owner.textContent = "Owner: " + (application.owner_name || application.ownerName || "Not provided");
+          const location = document.createElement("p");
+          location.textContent = "Location: " + [application.market || application.marketHub, application.city, application.state].filter(Boolean).join(", ");
+          const phone = document.createElement("p");
+          phone.textContent = "WhatsApp: " + (application.whatsapp || application.phone || "Not provided");
+          const submitted = document.createElement("p");
+          submitted.textContent = "Submitted: " + (application.submitted_at ? new Date(application.submitted_at).toLocaleString() : "Not recorded");
+          identity.append(name, owner, location, phone, submitted);
+          const badge = document.createElement("span");
+          badge.className = "badge " + String(application.status || "pending_review").toUpperCase();
+          badge.textContent = String(application.status || "pending review").replace(/_/g, " ");
+          heading.append(identity, badge);
+          row.append(heading);
+
+          const details = document.createElement("details");
+          const summary = document.createElement("summary");
+          summary.textContent = "View full registration details";
+          const registrationData = application.registration_data && Object.keys(application.registration_data).length
+            ? application.registration_data
+            : application;
+          const pre = document.createElement("pre");
+          pre.textContent = JSON.stringify({
+            registration: registrationData,
+            visualEvidence: application.visual_evidence || []
+          }, (key, value) => {
+            if (typeof value === "string" && /^data:image\\//i.test(value)) {
+              return "[embedded image data shown in preview]";
+            }
+            if (typeof value === "string" && value.length > 100000) {
+              return value.slice(0, 100000) + "… [truncated]";
+            }
+            return value;
+          }, 2);
+          details.append(summary, pre);
+          const images = collectEvidenceImages({
+            registration: registrationData,
+            evidence: application.visual_evidence || []
+          });
+          if (images.length) {
+            const previews = document.createElement("div");
+            previews.className = "evidence-images";
+            images.forEach((source) => {
+              const image = document.createElement("img");
+              image.src = source;
+              image.alt = "Business registration evidence";
+              image.referrerPolicy = "no-referrer";
+              previews.append(image);
+            });
+            details.append(previews);
+          }
+          row.append(details);
+
+          if (application.status === "rejected" && application.rejection_reason) {
+            const reason = document.createElement("p");
+            reason.textContent = "Rejection reason: " + application.rejection_reason;
+            row.append(reason);
+          }
+          if (application.notification_status && application.notification_status !== "sent") {
+            const notification = document.createElement("p");
+            notification.textContent = "WhatsApp notification: " +
+              (application.notification_error || application.notification_status || "not sent");
+            row.append(notification);
+          }
+
+          const actions = document.createElement("div");
+          actions.className = "actions";
+          if (application.status === "pending_review" || application.status === "submitted") {
+            const approve = document.createElement("button");
+            approve.type = "button";
+            approve.textContent = "Approve business";
+            approve.addEventListener("click", () => decideApplication(application, "approve"));
+            const reject = document.createElement("button");
+            reject.type = "button";
+            reject.className = "danger";
+            reject.textContent = "Reject";
+            reject.addEventListener("click", () => decideApplication(application, "reject"));
+            actions.append(approve, reject);
+          }
+          if (["approved", "rejected"].includes(application.status) && application.notification_status !== "sent") {
+            const retry = document.createElement("button");
+            retry.type = "button";
+            retry.className = "secondary";
+            retry.textContent = "Retry WhatsApp notification";
+            retry.addEventListener("click", () => retryApplicationNotification(application));
+            actions.append(retry);
+          }
+          if (actions.childElementCount) row.append(actions);
+          verificationList.append(row);
+        }
+      };
+      const loadVerifications = async () => {
+        verificationList.textContent = "Loading business applications…";
+        setStatus(verificationStatus, "");
+        try {
+          const result = await request("/api/v1/admin/verifications?status=all");
+          verificationApplications = result.verifications || result.applications || [];
+          renderVerifications();
+        } catch (error) {
+          verificationList.textContent = error.message || "Unable to load business applications.";
+          setStatus(verificationStatus, error.message || "Unable to load business applications.", true);
+        }
+      };
+      const decideApplication = async (application, decision) => {
+        let body = {};
+        if (decision === "approve") {
+          if (!window.confirm("Approve " + (application.business_name || "this business") + "?")) return;
+        } else {
+          const reason = window.prompt("Enter the reason for rejecting this business:");
+          if (reason === null) return;
+          if (!reason.trim()) {
+            setStatus(verificationStatus, "A rejection reason is required.", true);
+            return;
+          }
+          body = { reason: reason.trim() };
+        }
+        const vendorId = application.vendor_id || application.id;
+        try {
+          setStatus(verificationStatus, decision === "approve" ? "Approving business…" : "Rejecting business…");
+          const result = await request("/api/v1/admin/verifications/" + encodeURIComponent(vendorId) + "/" + decision, {
+            method: "POST",
+            body: JSON.stringify(body)
+          });
+          setStatus(verificationStatus, result.notificationSent
+            ? "Business " + (decision === "approve" ? "approved" : "rejected") + "; WhatsApp notification sent."
+            : "Business " + (decision === "approve" ? "approved" : "rejected") + ". WhatsApp notification was not sent: " +
+              (result.notificationMessage || "check the WhatsApp configuration."));
+          await loadVerifications();
+        } catch (error) {
+          setStatus(verificationStatus, error.message || "Business review action failed.", true);
+        }
+      };
+      const retryApplicationNotification = async (application) => {
+        const vendorId = application.vendor_id || application.id;
+        try {
+          setStatus(verificationStatus, "Retrying WhatsApp notification…");
+          const result = await request("/api/v1/admin/verifications/" + encodeURIComponent(vendorId) + "/notify", {
+            method: "POST",
+            body: "{}"
+          });
+          if (!result.notificationSent) throw new Error(result.notificationMessage || "WhatsApp notification was not sent.");
+          setStatus(verificationStatus, "WhatsApp notification sent.");
+          await loadVerifications();
+        } catch (error) {
+          setStatus(verificationStatus, error.message || "WhatsApp notification retry failed.", true);
+        }
+      };
       const loadDashboardData = async () => {
-        await Promise.all([loadCampaigns(), loadBoostRequests(), loadMetrics()]);
+        await Promise.all([loadCampaigns(), loadBoostRequests(), loadMetrics(), loadVerifications()]);
         if (!pollingTimer && adminKey) pollingTimer = setInterval(() => {
-          if (!dashboard.hidden) void Promise.all([loadCampaigns(), loadBoostRequests(), loadMetrics()]);
+          if (!dashboard.hidden) void Promise.all([loadCampaigns(), loadBoostRequests(), loadMetrics(), loadVerifications()]);
         }, 60000);
       };
       const verifyKey = async (key) => {
@@ -516,9 +736,11 @@ export const adminAdsDashboardHtml = `<!doctype html>
       document.getElementById("logout").addEventListener("click", lock);
       document.getElementById("refresh").addEventListener("click", loadDashboardData);
       document.getElementById("refresh-metrics").addEventListener("click", loadMetrics);
+      document.getElementById("refresh-verifications").addEventListener("click", loadVerifications);
       locationFilter.addEventListener("change", loadMetrics);
       categoryFilter.addEventListener("change", loadMetrics);
       boostStatusFilter.addEventListener("change", renderBoostRequests);
+      verificationStatusFilter.addEventListener("change", renderVerifications);
       document.getElementById("cancel-edit").addEventListener("click", resetForm);
       imageInput.addEventListener("change", () => {
         const file = imageInput.files && imageInput.files[0];
