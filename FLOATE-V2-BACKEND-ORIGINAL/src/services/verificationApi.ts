@@ -187,6 +187,18 @@ export async function getVerificationSession(paramsOrToken: string | VisualVerif
   if (phone) queryParams.set("phone", phone);
 
   const qs = queryParams.toString();
+  const authToken = typeof localStorage !== "undefined" ? localStorage.getItem("floate_auth_token") : null;
+  if (!authToken) {
+    return {
+      success: false,
+      valid: false,
+      token,
+      phone,
+      status: "unauthenticated",
+      message: "Sign in with the WhatsApp number associated with this business to continue."
+    };
+  }
+  const headers = { Authorization: `Bearer ${authToken}` };
   const endpoints = [
     `/api/verify/session${qs ? `?${qs}` : ""}`,
     `/verify/session${qs ? `?${qs}` : ""}`,
@@ -195,19 +207,31 @@ export async function getVerificationSession(paramsOrToken: string | VisualVerif
 
   for (const endpoint of endpoints) {
     try {
-      const res = await fetchWithFallback(endpoint);
+      const res = await fetchWithFallback(endpoint, { headers });
       if (res.ok) {
         const data = await res.json();
         const session = data.session || data;
+        const valid = data.valid === true || session.valid === true;
         return {
           ...data,
           ...session,
+          success: data.success === true && valid,
           business_name: session.business_name || session.businessName || "",
           owner_name: session.owner_name || session.ownerFullName || "",
           market: session.market || session.marketLocation || "",
           whatsapp: session.whatsapp || session.phone || "",
           phone: session.phone || session.whatsapp || phone,
-          valid: data.valid ?? true
+          valid
+        };
+      }
+      if (res.status === 401 || res.status === 403) {
+        return {
+          success: false,
+          valid: false,
+          token,
+          phone,
+          status: "unauthorized",
+          message: "Sign in with the WhatsApp number associated with this business to continue."
         };
       }
     } catch (e) {
@@ -231,6 +255,14 @@ export async function getVerificationSession(paramsOrToken: string | VisualVerif
  * POST /api/verify/submit-visual with { token, ref, phone, verificationType, photoBase64, notes, gpsCoords }
  */
 export async function submitVisualVerification(payload: VisualVerificationPayload): Promise<VisualVerificationResponse> {
+  const authToken = typeof localStorage !== "undefined" ? localStorage.getItem("floate_auth_token") : null;
+  if (!authToken) {
+    return {
+      success: false,
+      status: "unauthenticated",
+      message: "Sign in with the WhatsApp number associated with this business before submitting evidence."
+    };
+  }
   const body = JSON.stringify({
     token: payload.token || "",
     ref: payload.ref || "",
@@ -251,7 +283,7 @@ export async function submitVisualVerification(payload: VisualVerificationPayloa
     try {
       const res = await fetchWithFallback(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
         body
       });
       if (res.ok) {
@@ -279,17 +311,21 @@ export async function submitVerification(payload: VerificationSubmissionPayload)
   status?: string;
 }> {
   try {
+    const authToken = typeof localStorage !== "undefined" ? localStorage.getItem("floate_auth_token") : null;
+    if (!authToken) {
+      return { success: false, message: "Sign in with the WhatsApp number associated with this business before submitting." };
+    }
     // Try /verify/submit
     let res = await fetchWithFallback(`/verify/submit`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
       body: JSON.stringify(payload)
     });
 
     if (!res.ok && res.status === 404) {
       res = await fetchWithFallback(`/api/v1/verify/submit`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
         body: JSON.stringify(payload)
       });
     }

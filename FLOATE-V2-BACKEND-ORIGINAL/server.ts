@@ -13,7 +13,7 @@ import {
 } from "./src/bot/services/storefrontPaymentService.js";
 import { generateSitemapXML, generateRobotsTxt } from "./src/utils/sitemap";
 import searchRouter from "./routes/search";
-import v1Router, { getAllProducts } from "./routes/v1";
+import v1Router, { consumeRegistrationVerificationToken, getAllProducts } from "./routes/v1";
 import { initializeMeilisearchIndexes } from "./config/meilisearch";
 import { extractCategoryIntent, normalizeFloateCategory } from "./services/intentExtractor";
 import { ANCHOR_BUSINESSES } from "./controllers/searchController";
@@ -56,6 +56,7 @@ const firebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : get
 export const firestoreDb = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
 const app = express();
+const FLOATE_API_KEY = process.env.FLOATE_API_KEY || "";
 const requireAdminApiKey: express.RequestHandler = (req, res, next) => {
   const expectedKey = process.env.ADMIN_API_KEY || "";
   const providedKey = req.get("x-admin-api-key") || "";
@@ -273,8 +274,8 @@ app.get("/api/admin/boost-requests", requireAdminApiKey, async (_req, res) => {
 app.get("/api/admin/marketplace-metrics", requireAdminApiKey, async (req, res) => {
   try {
     const [businessSnapshot, merchantSnapshot, searchSnapshot, leadSnapshot, orderSnapshot] = await Promise.all([
-      getDocs(collection(firestoreDb, "businesses")),
-      getDocs(collection(firestoreDb, "merchants")),
+      adminFirestoreDb.collection("businesses").get(),
+      adminFirestoreDb.collection("merchants").get(),
       getDocs(collection(firestoreDb, "search_logs")),
       getDocs(collection(firestoreDb, "leads")),
       getDocs(collection(firestoreDb, "escrow_orders")),
@@ -760,13 +761,54 @@ app.get(["/api/handshake", "/handshake"], async (req, res) => {
 
 // Merchant Visual Verification Session Endpoint
 // GET /api/verify/session?token={token}&ref={ref}&phone={phone}
-app.get(["/api/verify/session", "/verify/session"], async (req, res) => {
+const requireVisualVerificationAuth: express.RequestHandler = (req, res, next) => {
+  const authorization = req.get("authorization") || "";
+  const rawToken = authorization.match(/^Bearer\s+(\S+)$/i)?.[1];
+  const decoded = rawToken ? whatsappAuthService.verifyJwtToken(rawToken) : null;
+  const authenticatedPhone = normalizeWhatsAppNumber(decoded?.phone);
+  if (!authenticatedPhone) {
+    return res.status(401).json({ success: false, error: "A valid WhatsApp session is required." });
+  }
+
+  const requestedPhone = normalizeWhatsAppNumber(
+    req.method === "GET" ? req.query.phone : req.body?.phone
+  );
+  if (requestedPhone && requestedPhone !== authenticatedPhone) {
+    return res.status(403).json({ success: false, error: "The verification phone must match the authenticated WhatsApp account." });
+  }
+
+  (req as express.Request & { visualVerificationPhone?: string }).visualVerificationPhone = authenticatedPhone;
+  next();
+};
+
+app.get(["/api/verify/session", "/verify/session"], requireVisualVerificationAuth, async (req, res) => {
+  if (!REMOTE_BACKEND) {
+    return res.status(503).json({ success: false, valid: false, error: "Verification backend is not configured." });
+  }
   try {
-    const qs = new URLSearchParams(req.query as any).toString();
-    const remote = await fetch(`${REMOTE_BACKEND}/api/verify/session?${qs}`, {
-      headers: { Accept: "application/json" }
+    const url = new URL(`${REMOTE_BACKEND}/api/verify/session`);
+    for (const [key, value] of Object.entries(req.query)) {
+      if (typeof value === "string") url.searchParams.set(key, value);
+    }
+    url.searchParams.set(
+      "phone",
+      (req as express.Request & { visualVerificationPhone?: string }).visualVerificationPhone || ""
+    );
+    const remote = await fetch(url, {
+      headers: { Accept: "application/json", Authorization: req.get("authorization") || "" }
     });
     const data = await remote.json().catch(() => null);
+    const session = data?.session || data;
+    const sessionPhone = normalizeWhatsAppNumber(session?.phone || session?.whatsapp);
+    const isValidSession = data?.valid === true || session?.valid === true;
+    const authenticatedPhone = (req as express.Request & { visualVerificationPhone?: string }).visualVerificationPhone;
+    if (remote.ok && (!isValidSession || sessionPhone !== authenticatedPhone)) {
+      return res.status(sessionPhone && sessionPhone !== authenticatedPhone ? 403 : 401).json({
+        success: false,
+        valid: false,
+        error: "The verification session is invalid or does not match the authenticated WhatsApp account."
+      });
+    }
     return res.status(remote.status).json(data || { success: false, error: "Verification backend returned an invalid response." });
   } catch (error) {
     console.error("[Verification] Session lookup failed:", error);
@@ -776,12 +818,49 @@ app.get(["/api/verify/session", "/verify/session"], async (req, res) => {
 
 // Merchant Visual Verification Submission Protocol
 // POST /api/verify/submit-visual with { token, ref, phone, verificationType, photoBase64, notes, gpsCoords }
-app.post(["/api/verify/submit-visual", "/verify/submit-visual"], async (req, res) => {
+app.post(["/api/verify/submit-visual", "/verify/submit-visual"], requireVisualVerificationAuth, async (req, res) => {
+  if (!REMOTE_BACKEND) {
+    return res.status(503).json({ success: false, error: "Verification backend is not configured." });
+  }
+  if (typeof req.body?.photoBase64 !== "string" || req.body.photoBase64.length > 16 * 1024 * 1024) {
+    return res.status(413).json({ success: false, error: "A photo proof under 12 MB is required." });
+  }
   try {
+    const token = String(req.body?.token || "").trim();
+    const ref = String(req.body?.ref || "").trim();
+    if (!token && !ref) {
+      return res.status(400).json({ success: false, error: "A valid verification session is required." });
+    }
+
+    const phone = (req as express.Request & { visualVerificationPhone?: string }).visualVerificationPhone || "";
+    const sessionUrl = new URL(`${REMOTE_BACKEND}/api/verify/session`);
+    if (token) sessionUrl.searchParams.set("token", token);
+    if (ref) sessionUrl.searchParams.set("ref", ref);
+    sessionUrl.searchParams.set("phone", phone);
+    const sessionResponse = await fetch(sessionUrl, {
+      headers: { Accept: "application/json", Authorization: req.get("authorization") || "" }
+    });
+    const sessionData = await sessionResponse.json().catch(() => null);
+    const session = sessionData?.session || sessionData;
+    const sessionPhone = normalizeWhatsAppNumber(session?.phone || session?.whatsapp);
+    if (!sessionResponse.ok || sessionData?.valid !== true && session?.valid !== true) {
+      return res.status(401).json({ success: false, error: "The verification session is invalid or expired." });
+    }
+    if (!sessionPhone || sessionPhone !== phone) {
+      return res.status(403).json({ success: false, error: "The verification session belongs to another WhatsApp account." });
+    }
+
     const remote = await fetch(`${REMOTE_BACKEND}/api/verify/submit-visual`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify(req.body)
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: req.get("authorization") || ""
+      },
+      body: JSON.stringify({
+        ...req.body,
+        phone
+      })
     });
     const data = await remote.json().catch(() => null);
     return res.status(remote.status).json(data || { success: false, error: "Verification backend returned an invalid response." });
@@ -797,7 +876,7 @@ app.post("/api/buyer/inquire", async (req, res) => {
     // Forward to remote backend if alive
     await fetch(`${REMOTE_BACKEND}/api/buyer/inquire`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6" },
+      headers: { "Content-Type": "application/json", "x-api-key": FLOATE_API_KEY },
       body: JSON.stringify(req.body)
     }).catch(() => null);
   } catch (e) {}
@@ -809,8 +888,8 @@ const normalizeRegistrationName = (name: unknown): string =>
 
 const findRegistrationConflict = async (businessName: string, phone: string) => {
   const [businesses, merchants] = await Promise.all([
-    getDocs(collection(firestoreDb, "businesses")),
-    getDocs(collection(firestoreDb, "merchants")),
+    adminFirestoreDb.collection("businesses").get(),
+    adminFirestoreDb.collection("merchants").get(),
   ]);
   const requestedName = normalizeRegistrationName(businessName);
   let nameExists = false;
@@ -883,8 +962,7 @@ app.post("/api/register/business", async (req, res) => {
     coordinates,
     initialProduct 
   } = req.body;
-  const cleanDigits = String(phone || "").replace(/[^0-9]/g, "");
-  const intlPhone = cleanDigits.startsWith("0") ? "234" + cleanDigits.slice(1) : (cleanDigits.startsWith("234") ? cleanDigits : "234" + cleanDigits);
+  const intlPhone = normalizeWhatsAppNumber(phone) || "";
   const photo = profileImageUrl || selfieUrl || profilePhoto || "";
   const merchantSlug = normalizeRegistrationName(businessName);
 
@@ -898,6 +976,11 @@ app.post("/api/register/business", async (req, res) => {
     }
   } catch {
     return res.status(400).json({ success: false, error: "A captured profile selfie is required to register." });
+  }
+
+  const registrationVerificationToken = String(req.body?.registrationVerificationToken || "");
+  if (!await consumeRegistrationVerificationToken(intlPhone, registrationVerificationToken)) {
+    return res.status(401).json({ success: false, error: "Verify control of this WhatsApp number before registering." });
   }
 
   try {
@@ -926,7 +1009,7 @@ app.post("/api/register/business", async (req, res) => {
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json",
-          "x-api-key": process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6"
+          "x-api-key": FLOATE_API_KEY
         },
         body: JSON.stringify(req.body)
       });
@@ -957,7 +1040,7 @@ app.post("/api/register/business", async (req, res) => {
     // Auto-aid description if not provided
     const resolvedDescription = description || bio || (
       isPhysical 
-        ? `Physical walk-in market stall at ${marketHub || city}${stallAddress ? `, ${stallAddress}` : ""}. Open for in-person customer inspection, instant pickup, and direct WhatsApp orders.`
+        ? `Physical walk-in market stall in ${marketHub || city || "Nigeria"}. Open for in-person customer inspection, instant pickup, and direct WhatsApp orders.`
         : `Online & nationwide dispatch merchant based in ${city || "Lagos"}, ${state || "Nigeria"}. Available for rapid waybill delivery and direct WhatsApp orders.`
     );
 
@@ -1000,7 +1083,7 @@ app.post("/api/register/business", async (req, res) => {
           city: city || "Lagos",
           state: state || "Nigeria",
           verified: false,
-          avatar_url: photo,
+          avatar_url: "",
           whatsapp_number: intlPhone
         }
       };
@@ -1023,7 +1106,6 @@ app.post("/api/register/business", async (req, res) => {
       slug: merchantSlug,
       businessName: businessName || "Market Merchant",
       name: businessName || "Market Merchant",
-      ownerName: ownerName || "",
       whatsapp: intlPhone,
       whatsappNumber: intlPhone,
       phone: intlPhone,
@@ -1033,16 +1115,8 @@ app.post("/api/register/business", async (req, res) => {
       city: city || "Lagos",
       category: category || "General Merchandise",
       primaryCategory: category || "General Merchandise",
-      location: stallAddress ? `${stallAddress}, ${marketHub || city}` : (marketHub || `${city}, ${state}`),
+      location: marketHub || `${city}, ${state}`,
       marketLocation: marketHub || `${city}, ${state}`,
-      stallAddress: stallAddress || "",
-      coordinates: coordinates || null,
-      avatarUrl: photo,
-      avatar_url: photo,
-      imageUrl: photo,
-      profileImageChangedAt: createdAt,
-      certificateId: credential.fid,
-      selfieUrl: photo,
       description: resolvedDescription,
       bio: resolvedDescription,
       verified: false,
@@ -1050,34 +1124,34 @@ app.post("/api/register/business", async (req, res) => {
       verificationStatus: "PENDING_REVIEW",
       verification_status: "pending_review",
       status: "PENDING_REVIEW",
-      credits: 25,
       initialProduct: initialProduct || null,
       products: initialProductList,
       createdAt
     };
 
-    const registrationNameKey = doc(firestoreDb, "business_registration_keys", `name_${merchantSlug}`);
-    const registrationPhoneKey = doc(firestoreDb, "business_registration_keys", `phone_${intlPhone}`);
-    const businessRef = doc(firestoreDb, "businesses", docId);
+    const registrationNameKey = adminFirestoreDb.collection("business_registration_keys").doc(`name_${merchantSlug}`);
+    const registrationPhoneKey = adminFirestoreDb.collection("business_registration_keys").doc(`phone_${intlPhone}`);
+    const businessRef = adminFirestoreDb.collection("businesses").doc(docId);
     const productRef = initialProductList[0]
-      ? doc(firestoreDb, "products", initialProductList[0].id)
+      ? adminFirestoreDb.collection("products").doc(initialProductList[0].id)
       : null;
-    const registrationResult = await runTransaction(firestoreDb, async (transaction) => {
-      const [nameKeySnapshot, phoneKeySnapshot] = await Promise.all([
+    const registrationResult = await adminFirestoreDb.runTransaction(async (transaction) => {
+      const [nameKeySnapshot, phoneKeySnapshot, businessSnapshot] = await Promise.all([
         transaction.get(registrationNameKey),
         transaction.get(registrationPhoneKey),
+        transaction.get(businessRef),
       ]);
-      if (nameKeySnapshot.exists() || phoneKeySnapshot.exists()) {
+      if (nameKeySnapshot.exists() || phoneKeySnapshot.exists() || businessSnapshot.exists()) {
         return {
           conflict: true,
           nameExists: nameKeySnapshot.exists(),
-          phoneExists: phoneKeySnapshot.exists(),
+          phoneExists: phoneKeySnapshot.exists() || businessSnapshot.exists(),
         };
       }
 
       transaction.set(registrationNameKey, { businessName, phone: intlPhone, createdAt });
       transaction.set(registrationPhoneKey, { businessName, phone: intlPhone, createdAt });
-      transaction.set(businessRef, businessData, { merge: true });
+      transaction.create(businessRef, businessData);
       if (productRef && initialProductList[0]) {
         transaction.set(productRef, {
           ...initialProductList[0],
@@ -1124,7 +1198,9 @@ app.post("/api/register/business", async (req, res) => {
       profile_photo_url: photo,
       status: "pending_review",
       verification_status: "pending_review",
-      registration_data: req.body,
+      registration_data: Object.fromEntries(
+        Object.entries(req.body || {}).filter(([key]) => key !== "registrationVerificationToken")
+      ),
       submitted_at: applicationSubmittedAt,
       createdAt: applicationSubmittedAt,
       notification_status: "not_sent"
@@ -1151,9 +1227,9 @@ app.post("/api/register/business", async (req, res) => {
 app.get("/api/credentials/lookup/:slug", async (req, res) => {
   const { slug } = req.params;
   const cleanSlug = String(slug || "").toLowerCase().trim();
+  if (!cleanSlug) return res.status(400).json({ success: false, error: "Merchant identifier is required." });
   try {
-    const businessesRef = collection(firestoreDb, "businesses");
-    const snapshot = await getDocs(businessesRef);
+    const snapshot = await adminFirestoreDb.collection("businesses").get();
     let foundMerchant: any = null;
 
     snapshot.forEach((dSnap) => {
@@ -1162,36 +1238,23 @@ app.get("/api/credentials/lookup/:slug", async (req, res) => {
       const dPhone = String(data.phone || data.whatsapp || "").toLowerCase();
       const dName = String(data.businessName || data.name || "").toLowerCase().replace(/[^a-z0-9]/g, "-");
       
-      if (dSlug === cleanSlug || dPhone === cleanSlug || dName === cleanSlug || dSnap.id.toLowerCase().includes(cleanSlug)) {
+      if (dSlug === cleanSlug || dPhone === cleanSlug || dName === cleanSlug || dSnap.id.toLowerCase() === cleanSlug) {
         foundMerchant = data;
       }
     });
 
-    if (foundMerchant) {
-      return res.json({
-        success: true,
-        merchant: {
-          businessName: foundMerchant.businessName || foundMerchant.name || "Verified Merchant",
-          phone: foundMerchant.phone || foundMerchant.whatsapp || "2348031112222",
-          slug: foundMerchant.slug || foundMerchant.phone || cleanSlug,
-          location: foundMerchant.location || foundMerchant.marketLocation || "Lagos, Nigeria",
-          isVerified: true,
-          verified: true,
-          rating: foundMerchant.rating || 5.0
-        }
-      });
-    }
-
+    if (!foundMerchant) return res.status(404).json({ success: false, error: "Business not found." });
+    const verified = isMerchantVerificationApproved(foundMerchant);
     return res.json({
       success: true,
       merchant: {
-        businessName: "Floate Verified Stall",
-        phone: cleanSlug.replace(/[^0-9]/g, "") || "2348031112222",
-        slug: cleanSlug,
-        location: "Lagos, Nigeria",
-        isVerified: true,
-        verified: true,
-        rating: 5.0
+        businessName: foundMerchant.businessName || foundMerchant.name || "",
+        phone: foundMerchant.phone || foundMerchant.whatsapp || "",
+        slug: foundMerchant.slug || cleanSlug,
+        location: foundMerchant.location || foundMerchant.marketLocation || "",
+        isVerified: verified,
+        verified,
+        rating: foundMerchant.rating
       }
     });
   } catch (err: any) {
@@ -1214,7 +1277,7 @@ app.get("/api/credentials/:slug/download/certificate", async (req, res) => {
     let credential: Awaited<ReturnType<typeof resolveCredential>> = null;
     const merchantPhone = normalizeWhatsAppNumber(identifier);
     if (merchantPhone) {
-      const businessSnapshot = await getDoc(doc(firestoreDb, "businesses", `vendor_${merchantPhone}`));
+      const businessSnapshot = await adminFirestoreDb.collection("businesses").doc(`vendor_${merchantPhone}`).get();
       if (businessSnapshot.exists()) {
         const business = businessSnapshot.data();
         const location = String(
@@ -1261,11 +1324,22 @@ app.get("/api/credentials/:slug/download/certificate", async (req, res) => {
 });
 
 // Catalog Product Add Endpoint: POST /api/catalog/product
-app.post("/api/catalog/product", async (req, res) => {
+app.post(
+  "/api/catalog/product",
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  async (req, res) => {
   const { vendorPhone, identifier, name, title, price, description, category, imageUrl, image } = req.body;
   const prodName = String(name || title || "").trim();
   const normalizedVendorPhone = normalizeWhatsAppNumber(vendorPhone || identifier);
   const numPrice = typeof price === "number" ? price : parseFloat(String(price || "0").replace(/[^0-9.]/g, ""));
+
+  if (!req.user) {
+    return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to add products." });
+  }
+  const authenticatedPhone = normalizeWhatsAppNumber(req.user.phone || req.user.sub || req.user.vendorId);
+  if (!authenticatedPhone || authenticatedPhone !== normalizedVendorPhone) {
+    return res.status(403).json({ success: false, error: "You can only add products to your own business catalog." });
+  }
   let portfolioUrl = "";
   let portfolioPreviewImageUrl = "";
 
@@ -1290,7 +1364,8 @@ app.post("/api/catalog/product", async (req, res) => {
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json",
-          "x-api-key": process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6"
+          Authorization: req.get("authorization") || "",
+          "x-api-key": FLOATE_API_KEY
         },
         body: JSON.stringify({ ...req.body, portfolioUrl, portfolioPreviewImageUrl })
       });
@@ -1307,7 +1382,7 @@ app.post("/api/catalog/product", async (req, res) => {
   // 2. Persist to shared Firestore and associate the listing with its merchant record.
   const prodId = `prod_${Date.now()}`;
   try {
-    const businesses = await getDocs(collection(firestoreDb, "businesses"));
+    const businesses = await adminFirestoreDb.collection("businesses").get();
     const merchantDoc = businesses.docs.find((businessDoc) => {
       const business = businessDoc.data();
       return normalizeWhatsAppNumber(
@@ -1319,7 +1394,7 @@ app.post("/api/catalog/product", async (req, res) => {
     }
 
     const merchant = merchantDoc.data();
-    const currentProductDocs = await getDocs(collection(firestoreDb, "products"));
+    const currentProductDocs = await adminFirestoreDb.collection("products").get();
     const currentProductCount = currentProductDocs.docs.filter((productDoc) => {
       const product = productDoc.data();
       return normalizeWhatsAppNumber(product.vendorPhone || product.whatsapp || product.phone) === normalizedVendorPhone;
@@ -1389,15 +1464,15 @@ app.post("/api/catalog/product", async (req, res) => {
         verified: isApprovedMerchant,
         isVerified: isApprovedMerchant,
         verificationStatus: merchant.verificationStatus || (isApprovedMerchant ? "APPROVED" : "PENDING_REVIEW"),
-        avatar_url: merchant.avatarUrl || merchant.avatar_url || merchant.selfieUrl || "",
+        avatar_url: merchant.publicAvatarUrl || "",
         whatsapp_number: normalizedVendorPhone
       }
     };
 
     // Write product to shared Firestore collection
-    await setDoc(doc(firestoreDb, "products", prodId), newProductObj, { merge: true });
+    await adminFirestoreDb.collection("products").doc(prodId).set(newProductObj, { merge: true });
     const currentProducts = Array.isArray(merchant.products) ? merchant.products : [];
-    await setDoc(merchantDoc.ref, {
+    await merchantDoc.ref.set({
       products: [newProductObj, ...currentProducts]
     }, { merge: true });
     console.log(`[Firestore] New product ${prodName} (₦${numPrice}) saved for ${businessName} (${normalizedVendorPhone})`);
@@ -1445,7 +1520,7 @@ app.patch(
     }
 
     try {
-      const businesses = await getDocs(collection(firestoreDb, "businesses"));
+      const businesses = await adminFirestoreDb.collection("businesses").get();
       const merchantDoc = businesses.docs.find((businessDoc) => {
         const business = businessDoc.data();
         return normalizeWhatsAppNumber(
@@ -1459,7 +1534,7 @@ app.patch(
       const merchant = merchantDoc.data();
       const embeddedProducts = Array.isArray(merchant.products) ? merchant.products : [];
       const embeddedIndex = embeddedProducts.findIndex((product: any) => String(product.id || "") === productId);
-      const productSnapshot = await getDocs(collection(firestoreDb, "products"));
+      const productSnapshot = await adminFirestoreDb.collection("products").get();
       const productDoc = productSnapshot.docs.find((candidate) => {
         const product = candidate.data();
         return String(product.id || candidate.id) === productId;
@@ -1503,7 +1578,7 @@ app.patch(
         portfolioPreviewImageUrl
       };
 
-      const batch = writeBatch(firestoreDb);
+      const batch = adminFirestoreDb.batch();
       if (productDoc) batch.set(productDoc.ref, updatedProduct, { merge: true });
       if (embeddedIndex >= 0) {
         const updatedProducts = embeddedProducts.map((product: any, index: number) =>
@@ -1520,9 +1595,15 @@ app.patch(
   }
 );
 
-app.patch("/api/catalog/product/:id/condition", async (req, res) => {
+app.patch(
+  "/api/catalog/product/:id/condition",
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  async (req, res) => {
   const productId = String(req.params.id || "").trim();
-  const vendorPhone = normalizeWhatsAppNumber(req.body.vendorPhone);
+  if (!req.user) {
+    return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to update products." });
+  }
+  const vendorPhone = normalizeWhatsAppNumber(req.user.phone || req.user.sub || req.user.vendorId);
   const acceptedConditions = ["new", "used", "refurbished"] as const;
   const submittedCondition = typeof req.body.condition === "string"
     ? req.body.condition.trim().toLowerCase()
@@ -1533,7 +1614,7 @@ app.patch("/api/catalog/product/:id/condition", async (req, res) => {
   }
 
   try {
-    const businesses = await getDocs(collection(firestoreDb, "businesses"));
+    const businesses = await adminFirestoreDb.collection("businesses").get();
     const merchantDoc = businesses.docs.find((businessDoc) => {
       const business = businessDoc.data();
       return normalizeWhatsAppNumber(
@@ -1547,7 +1628,7 @@ app.patch("/api/catalog/product/:id/condition", async (req, res) => {
     const merchant = merchantDoc.data();
     const embeddedProducts = Array.isArray(merchant.products) ? merchant.products : [];
     const embeddedIndex = embeddedProducts.findIndex((product: any) => String(product.id || "") === productId);
-    const productSnapshot = await getDocs(collection(firestoreDb, "products"));
+    const productSnapshot = await adminFirestoreDb.collection("products").get();
     const productDoc = productSnapshot.docs.find((candidate) => {
       const product = candidate.data();
       return String(product.id || candidate.id) === productId;
@@ -1579,7 +1660,7 @@ app.patch("/api/catalog/product/:id/condition", async (req, res) => {
       return res.status(403).json({ success: false, error: "This product does not belong to the registered merchant." });
     }
 
-    const batch = writeBatch(firestoreDb);
+    const batch = adminFirestoreDb.batch();
     if (productDoc) batch.set(productDoc.ref, { condition }, { merge: true });
     if (embeddedIndex >= 0) {
       const updatedProducts = embeddedProducts.map((product: any, index: number) =>
@@ -1658,7 +1739,8 @@ function buildMerchantPayload(matchedVendor: any, rawParam: string = "") {
   const squareBoostUrl = `/api/v1/assets/square-boost/${encodeURIComponent(fid)}`;
 
   const vName = matchedVendor.businessName || matchedVendor.name || "Floate Verified Merchant";
-  const vLocation = matchedVendor.location || matchedVendor.marketLocation || `${matchedVendor.city || "Lagos"}, ${matchedVendor.state || "Nigeria"}`;
+  const vLocation = matchedVendor.marketHub || matchedVendor.marketShort ||
+    `${matchedVendor.city || "Lagos"}, ${matchedVendor.state || "Nigeria"}`;
   const merchantSlug = createMerchantSlug(vName) || matchedVendor.slug || matchedVendor.id || `vendor_${intlPhone}`;
 
   return {
@@ -1681,28 +1763,96 @@ function buildMerchantPayload(matchedVendor: any, rawParam: string = "") {
     hasPhysicalStore: matchedVendor.hasPhysicalStore !== false,
     storeType: matchedVendor.storeType || "physical_store",
     location: vLocation,
-    marketLocation: matchedVendor.marketLocation || vLocation,
-    stallAddress: matchedVendor.stallAddress || matchedVendor.location || "",
-    coordinates: matchedVendor.coordinates || null,
+    marketLocation: matchedVendor.marketHub || matchedVendor.marketShort || vLocation,
+    marketHub: matchedVendor.marketHub || matchedVendor.marketShort || "",
     city: matchedVendor.city || "Lagos",
     state: matchedVendor.state || "Nigeria",
-    ownerName: matchedVendor.ownerName || matchedVendor.ownerFullName || "",
-    ownerFullName: matchedVendor.ownerFullName || matchedVendor.ownerName || "",
-    businessAddress: matchedVendor.businessAddress || matchedVendor.addressDetail || matchedVendor.stallAddress || "",
-    marketHub: matchedVendor.marketHub || matchedVendor.marketLocation || "",
     whatsappNumber: intlPhone,
     whatsapp: intlPhone,
     phone: intlPhone,
-    paidProductSlots: Math.max(0, Number(matchedVendor.paidProductSlots || 0)),
     verified: isVendorVerified,
     isVerified: isVendorVerified,
     verificationStatus: getMerchantVerificationStatus(matchedVendor),
     verification_status: getMerchantVerificationStatus(matchedVendor).toLowerCase(),
-    avatarUrl: matchedVendor.profilePhotoUrl || matchedVendor.avatarUrl || matchedVendor.avatar_url || matchedVendor.selfieUrl || matchedVendor.imageUrl || badgeUrl,
-    avatar_url: matchedVendor.profilePhotoUrl || matchedVendor.avatar_url || matchedVendor.avatarUrl || matchedVendor.selfieUrl || matchedVendor.imageUrl || badgeUrl,
+    avatarUrl: matchedVendor.publicAvatarUrl || badgeUrl,
+    avatar_url: matchedVendor.publicAvatarUrl || badgeUrl,
     initials: matchedVendor.initials || vName.slice(0, 2).toUpperCase(),
     whatsappDeepLink: deepLink,
-    products: Array.isArray(matchedVendor.products) ? matchedVendor.products : []
+    products: Array.isArray(matchedVendor.products)
+      ? matchedVendor.products.map((product: any) => toPublicCatalogProduct(product, matchedVendor))
+      : []
+  };
+}
+
+function toPublicCatalogProduct(product: any, merchant: any = {}) {
+  const vendor = product?.vendor && typeof product.vendor === "object" ? product.vendor : {};
+  const title = String(product?.title || product?.name || product?.product || "").trim();
+  const rawPrice = product?.price_naira ?? product?.numericPrice ?? product?.price ?? 0;
+  const price = typeof rawPrice === "number"
+    ? rawPrice
+    : parseFloat(String(rawPrice).replace(/[^0-9.]/g, "")) || 0;
+  const merchantName = String(merchant.businessName || merchant.name || product?.businessName || product?.vendorName || vendor.name || "");
+  const merchantSlug = createMerchantSlug(merchantName) || String(product?.merchantSlug || product?.vendorSlug || vendor.slug || "");
+  const merchantPhone = normalizeWhatsAppNumber(
+    merchant.whatsappNumber || merchant.whatsapp || merchant.phone || product?.vendorPhone ||
+    vendor.whatsapp_number || vendor.whatsappNumber
+  ) || "";
+  const productImage = product?.photo_url || product?.imageUrl || product?.image || "";
+  const image = typeof productImage === "string" && productImage.length <= 2048 ? productImage : "";
+  const boostUntil = Date.parse(String(product?.boostedUntil || product?.boosted_until || ""));
+  const rawSpecs = product?.specs;
+  const specs = Array.isArray(rawSpecs)
+    ? rawSpecs.slice(0, 30)
+    : typeof rawSpecs === "string"
+      ? rawSpecs.split(/[•,]/).map((spec: string) => spec.trim()).filter(Boolean).slice(0, 30)
+      : [];
+  return {
+    id: String(product?.id || ""),
+    title,
+    name: title,
+    product: title,
+    price_naira: Number.isFinite(price) ? price : 0,
+    price: Number.isFinite(price) ? price : 0,
+    formatted_price: String(product?.formatted_price || (price ? `₦${price.toLocaleString()}` : "")),
+    businessName: merchantName,
+    merchantName,
+    vendorName: merchantName,
+    seller: merchantName,
+    city: String(merchant.city || product?.city || vendor.city || ""),
+    state: String(merchant.state || product?.state || vendor.state || ""),
+    marketHub: String(merchant.marketHub || product?.marketHub || ""),
+    whatsapp: merchantPhone,
+    whatsappNumber: merchantPhone,
+    photo_url: image,
+    imageUrl: image,
+    photoUrl: image,
+    photos: Array.isArray(product?.photos)
+      ? product.photos.filter((photo: unknown) => typeof photo === "string" && photo.length <= 2048).slice(0, 10)
+      : image ? [image] : [],
+    description: String(product?.description || "").slice(0, 2000),
+    category: String(product?.category || merchant.category || "General Merchandise"),
+    condition: String(product?.condition || ""),
+    specs,
+    in_stock: product?.in_stock !== false,
+    is_sale: Boolean(product?.is_sale),
+    isBoosted: Boolean(
+      (product?.isBoosted || product?.is_boosted || product?.boosted) &&
+      Number.isFinite(boostUntil) && boostUntil > Date.now()
+    ),
+    portfolioUrl: String(product?.portfolioUrl || ""),
+    portfolioPreviewImageUrl: String(product?.portfolioPreviewImageUrl || ""),
+    merchantSlug,
+    slug: String(product?.slug || merchantSlug),
+    vendor: {
+      slug: merchantSlug,
+      name: merchantName,
+      city: String(merchant.city || product?.city || vendor.city || ""),
+      state: String(merchant.state || product?.state || vendor.state || ""),
+      verified: isMerchantVerificationApproved(merchant),
+      isVerified: isMerchantVerificationApproved(merchant),
+      verificationStatus: getMerchantVerificationStatus(merchant),
+      whatsapp_number: merchantPhone
+    }
   };
 }
 
@@ -1713,7 +1863,7 @@ async function findVendorByIdentifier(param: string) {
 
   // Prefer persisted merchant records so profile changes override static anchor data.
   try {
-    const snap = await getDocs(collection(firestoreDb, "businesses"));
+    const snap = await adminFirestoreDb.collection("businesses").get();
     for (const docSnap of snap.docs) {
       const d = docSnap.data();
       const docId = docSnap.id;
@@ -1739,7 +1889,7 @@ async function findVendorByIdentifier(param: string) {
 
   // Resolve backend merchant records, including merchants awaiting review.
   try {
-    const snap = await getDocs(collection(firestoreDb, 'merchants'));
+    const snap = await adminFirestoreDb.collection("merchants").get();
     for (const docSnap of snap.docs) {
       const merchant = docSnap.data();
       const merchantPhone = String(merchant.whatsapp || merchant.id || docSnap.id).replace(/[^0-9]/g, '');
@@ -1902,8 +2052,8 @@ const getProfileImageEligibility = (business: Record<string, unknown>, now = new
 
 const getMatchingMerchantDocs = async (phone: string) => {
   const [businesses, merchants] = await Promise.all([
-    getDocs(collection(firestoreDb, "businesses")),
-    getDocs(collection(firestoreDb, "merchants"))
+    adminFirestoreDb.collection("businesses").get(),
+    adminFirestoreDb.collection("merchants").get()
   ]);
   return [...businesses.docs, ...merchants.docs].filter((merchantDoc) => {
     const business = merchantDoc.data();
@@ -2065,7 +2215,6 @@ app.get(["/api/v1/verify/:fid", "/api/verify/:fid"], async (req, res) => {
       businessName: merchant.name,
       name: merchant.name,
       location: merchant.location,
-      stallAddress: merchant.stallAddress || merchant.location,
       storeType: merchant.storeType,
       whatsappNumber: merchant.whatsappNumber,
       badgeUrl: merchant.badgeUrl,
@@ -2513,7 +2662,7 @@ app.get("/api/catalog/vendor/:phone/products", async (req, res) => {
   const identifier = String(req.params.phone || "").trim().toLowerCase();
   const requestedPhone = normalizeWhatsAppNumber(identifier);
   try {
-    const businesses = await getDocs(collection(firestoreDb, "businesses"));
+    const businesses = await adminFirestoreDb.collection("businesses").get();
     const merchantDoc = businesses.docs.find((businessDoc) => {
       const merchant = businessDoc.data();
       const merchantNameSlug = createMerchantSlug(merchant.businessName || merchant.name || "");
@@ -2537,7 +2686,7 @@ app.get("/api/catalog/vendor/:phone/products", async (req, res) => {
     const merchantPhone = normalizeWhatsAppNumber(
       merchant.whatsappNumber || merchant.whatsapp || merchant.phone || merchant.whatsapp_number
     ) || "";
-    const productSnapshot = await getDocs(collection(firestoreDb, "products"));
+    const productSnapshot = await adminFirestoreDb.collection("products").get();
     const productsById = new Map<string, any>();
 
     for (const product of [...(Array.isArray(merchant.products) ? merchant.products : []), ...productSnapshot.docs.map((item) => item.data())]) {
@@ -2554,34 +2703,14 @@ app.get("/api/catalog/vendor/:phone/products", async (req, res) => {
       if (belongsToMerchant && productId) productsById.set(productId, product);
     }
 
-    const allProducts = Array.from(productsById.values()).map((product) => {
-      const price = Number(product.price_naira ?? product.price ?? product.numericPrice ?? 0);
-      return {
-        ...product,
-        title: product.title || product.name,
-        price_naira: price,
-        price,
-        formatted_price: product.formatted_price || `₦${price.toLocaleString()}`,
-        photo_url: product.photo_url || product.photoUrl || product.imageUrl || "",
+    const allProducts = Array.from(productsById.values()).map((product) =>
+      toPublicCatalogProduct(product, {
+        ...merchant,
         businessName,
-        merchantSlug,
-        vendorPhone: merchantPhone,
-        whatsapp: merchantPhone,
-        whatsappNumber: merchantPhone,
-        city: product.city || merchant.city || "Lagos",
-        state: product.state || merchant.state || "Nigeria",
-        vendor: {
-          ...(product.vendor || {}),
-          slug: merchantSlug,
-          name: businessName,
-          city: merchant.city || "Lagos",
-          state: merchant.state || "Nigeria",
-          verified: merchant.verified === true || merchant.isVerified === true,
-          avatar_url: merchant.avatarUrl || merchant.avatar_url || merchant.selfieUrl || "",
-          whatsapp_number: merchantPhone
-        }
-      };
-    });
+        slug: merchantSlug,
+        whatsapp: merchantPhone
+      })
+    );
 
     const pageSize = 12;
     const pageNumber = Math.max(1, Number(req.query.cursor?.toString().replace("page_", "")) || 1);
@@ -2791,7 +2920,7 @@ const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 // Background keep-alive for Floate API backend
 const API_URL = process.env.FLOATE_SEARCH_API_URL ||
   (REMOTE_BACKEND ? `${REMOTE_BACKEND}/api/search` : "");
-const API_KEY = process.env.FLOATE_SEARCH_API_KEY || "floate_live_sk_7f8a92b3c4e5d6";
+const API_KEY = process.env.FLOATE_SEARCH_API_KEY || "";
 
 const warmUpExternalApi = async () => {
   if (!API_URL) return;
@@ -3924,41 +4053,37 @@ app.post("/api/generate-invoice", async (req, res) => {
 });
 
 // Real-Time RESEND Outbound Email Communications Gateway Integration
-app.post("/api/send-email", async (req, res) => {
+app.post("/api/send-email", requireAdminApiKey, async (req, res) => {
   try {
-    const { to, subject, message, html, resendApiKey, senderEmail } = req.body;
+    const { to, subject, message, html } = req.body;
+    const recipient = typeof to === "string" ? to.trim() : "";
+    const allowedRecipients = (process.env.EMAIL_ALLOWED_RECIPIENTS || "")
+      .split(",")
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean);
 
-    if (!to || (!message && !html)) {
+    if (
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient) ||
+      (typeof message !== "string" && typeof html !== "string") ||
+      (typeof message === "string" && message.length > 100_000) ||
+      (typeof html === "string" && html.length > 100_000)
+    ) {
       return res.status(400).json({ error: "Parameters 'to' and 'message' (or 'html') are required." });
     }
-
-    const apiKey = resendApiKey || process.env.RESEND_API_KEY;
-    const finalHtml = html || `<p>${message}</p>`;
-    const finalSubject = subject || "Floate Automated Behavioral Enforcement Alert";
-    
-    // Determine the "from" address: use custom sender if valid, else fallback
-    let fromAddress = "Floate Enforcement <onboarding@resend.dev>";
-    if (senderEmail && senderEmail.includes("@")) {
-      if (senderEmail.includes("<") && senderEmail.includes(">")) {
-        fromAddress = senderEmail;
-      } else {
-        fromAddress = `Floate Enforcement <${senderEmail}>`;
-      }
+    if (!allowedRecipients.includes(recipient.toLowerCase())) {
+      return res.status(403).json({ success: false, error: "Recipient is not allowlisted." });
     }
 
-    if (!apiKey) {
-      console.log(`[Resend Simulator] Email to ${to}, Subject: "${finalSubject}", Content: "${finalHtml}"`);
-      return res.json({
-        success: true,
-        simulated: true,
-        message: "Email simulated successfully. Provide your RESEND_API_KEY in the environment to dispatch real emails!",
-        to,
-        subject: finalSubject,
-        html: finalHtml
-      });
-    }
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) return res.status(503).json({ success: false, error: "Email delivery is not configured." });
+    const fromAddress = process.env.RESEND_FROM_EMAIL;
+    if (!fromAddress) return res.status(503).json({ success: false, error: "Email sender is not configured." });
+    const finalHtml = typeof html === "string" ? html : `<p>${message}</p>`;
+    const finalSubject = typeof subject === "string" && subject.trim()
+      ? subject.trim().slice(0, 200)
+      : "Floate Automated Behavioral Enforcement Alert";
 
-    console.log(`[Resend Dispatch] Initiating Resend API call to send email to ${to}`);
+    console.log(`[Resend Dispatch] Initiating Resend API call to send email to ${recipient}`);
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
@@ -3967,7 +4092,7 @@ app.post("/api/send-email", async (req, res) => {
       },
       body: JSON.stringify({
         from: fromAddress,
-        to: [to],
+        to: [recipient],
         subject: finalSubject,
         html: finalHtml
       })
@@ -3989,7 +4114,7 @@ app.post("/api/send-email", async (req, res) => {
       success: true,
       simulated: false,
       message: "Outbound automated email successfully dispatched via Resend!",
-      to,
+      to: recipient,
       resendDetails: responseData
     });
 
@@ -4581,7 +4706,6 @@ app.post("/api/storefront/products/:id/boost", (req, res) => {
 
 // FLOATE BOT & COMMERCE API INTEGRATION
 const FLOATE_API_BASE_URL = (process.env.FLOATE_UPSTREAM_BACKEND_URL || "").replace(/\/+$/, "");
-const FLOATE_API_KEY = process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6";
 
 function formatWhatsAppBuyLink(phone: string, merchantName: string, productTitle: string, price?: number | string) {
   const internationalPhone = normalizeWhatsAppNumber(phone);
@@ -4831,11 +4955,12 @@ const REGISTERED_MERCHANT_CATALOG = [
 // Helper to fetch live backend products catalog directly from Firestore
 async function fetchBackendInventory(): Promise<any[]> {
   try {
-    const pSnap = await getDocs(collection(firestoreDb, "products"));
+    const pSnap = await adminFirestoreDb.collection("products").get();
     if (!pSnap.empty) {
       const directItems: any[] = [];
       pSnap.forEach(docSnap => {
-        directItems.push({ id: docSnap.id, ...docSnap.data() });
+        const product = { id: docSnap.id, ...docSnap.data() };
+        directItems.push(toPublicCatalogProduct(product, product.vendor || {}));
       });
       return directItems;
     }
@@ -4855,7 +4980,7 @@ async function fetchBackendInventory(): Promise<any[]> {
       const d = await res.json();
       const remoteItems = Array.isArray(d.products) ? d.products : (Array.isArray(d.results) ? d.results : []);
       if (remoteItems.length > 0) {
-        return remoteItems;
+        return remoteItems.map((product: any) => toPublicCatalogProduct(product, product.vendor || {}));
       }
     }
   } catch (e) {
@@ -4909,12 +5034,12 @@ app.get("/api/storefront/merchants/:slug", async (req, res) => {
 
     // 1. Direct Firestore Lookup for Merchant Profile
     try {
-      const docSnap = await getDoc(doc(firestoreDb, "businesses", slugKey));
+      const docSnap = await adminFirestoreDb.collection("businesses").doc(slugKey).get();
       if (docSnap.exists()) {
         merchantData = docSnap.data();
       } else {
         const requestedPhone = normalizeWhatsAppNumber(slugKey);
-        const businesses = await getDocs(collection(firestoreDb, "businesses"));
+        const businesses = await adminFirestoreDb.collection("businesses").get();
         const matchingBusiness = businesses.docs.find((businessDoc) => {
           const business = businessDoc.data();
           const nameSlug = createMerchantSlug(business.businessName || business.name || "");
@@ -5029,63 +5154,38 @@ app.get("/api/storefront/merchants/:slug", async (req, res) => {
       statusesData = matchedStatuses;
     }
 
-    productsData = productsData.map((product: any) => {
-      const rawPrice = product.numericPrice ?? product.price_naira ?? product.price ?? 0;
-      const price = typeof rawPrice === "number"
-        ? rawPrice
-        : parseFloat(String(rawPrice).replace(/[^0-9.]/g, "")) || 0;
-      const rawSpecs = product.specs;
-      const specs = Array.isArray(rawSpecs)
-        ? rawSpecs
-        : typeof rawSpecs === "string"
-        ? rawSpecs.split(/[•,]/).map((spec: string) => spec.trim()).filter(Boolean)
-        : [];
-      const title = product.title || product.name || product.product || "Merchant listing";
-      const imageUrl = product.imageUrl || product.photoUrl || product.photo_url || product.image || "";
-
-      return {
-        ...product,
-        id: product.id || `prod_${merchantData.id || slugKey}_${title}`,
-        title,
-        price,
-        price_naira: price,
-        imageUrl,
-        photo_url: imageUrl,
-        category: product.category || merchantData.category || "General Merchandise",
-        condition: product.condition || "NEW LISTING",
-        specs,
-        isBoosted: Boolean(
-          (product.isBoosted || product.is_boosted || product.boosted) &&
-          Number.isFinite(Date.parse(String(product.boostedUntil || product.boosted_until || ""))) &&
-          Date.parse(String(product.boostedUntil || product.boosted_until || "")) > Date.now()
-        )
-      };
-    });
+    productsData = productsData.map((product: any) =>
+      toPublicCatalogProduct(product, merchantData)
+    );
 
     const merchantName = merchantData.businessName || merchantData.name || "Market Merchant";
-    const merchantLocation = merchantData.location || merchantData.marketLocation ||
+    const merchantLocation = merchantData.marketHub || merchantData.marketLocation ||
       `${merchantData.city || "Nigeria"}, ${merchantData.state || ""}`.replace(/,\s*$/, "");
+    const verified = isMerchantVerificationApproved(merchantData);
     const publicMerchant = {
-      ...merchantData,
       id: merchantData.id || `vendor_${merchantPhone}`,
       slug: createMerchantSlug(merchantName) || merchantData.slug || slugKey,
       name: merchantName,
       businessName: merchantName,
-      handle: merchantData.handle || `@${createMerchantSlug(merchantName) || slugKey}`,
+      handle: `@${createMerchantSlug(merchantName) || slugKey}`,
+      category: merchantData.category || merchantData.primaryCategory || "General Merchandise",
+      primaryCategory: merchantData.primaryCategory || merchantData.category || "General Merchandise",
+      city: merchantData.city || "",
+      state: merchantData.state || "",
       whatsapp: merchantPhone,
       whatsappNumber: merchantPhone,
       phone: merchantPhone,
-      avatarUrl: merchantData.avatarUrl || merchantData.avatar_url || merchantData.selfieUrl || merchantData.imageUrl || getMerchantAvatar(merchantName),
-      verified: merchantData.verified === true || merchantData.isVerified === true,
-      isVerified: merchantData.verified === true || merchantData.isVerified === true,
+      avatarUrl: merchantData.publicAvatarUrl || getMerchantAvatar(merchantName, merchantData.category),
+      avatar_url: merchantData.publicAvatarUrl || getMerchantAvatar(merchantName, merchantData.category),
+      verified,
+      isVerified: verified,
+      verificationStatus: getMerchantVerificationStatus(merchantData),
       marketLocation: merchantLocation,
-      marketShort: merchantData.marketShort || merchantData.marketHub || merchantData.geoHubName || merchantLocation,
+      marketShort: merchantData.marketShort || merchantData.marketHub || merchantLocation,
       rating: Number(merchantData.rating) || 0,
       completedEscrows: Number(merchantData.completedEscrows || merchantData.completed_escrows) || 0,
       activeStatus: merchantData.activeStatus || "Available on WhatsApp",
       bio: merchantData.bio || merchantData.description || "",
-      safePayLevel: merchantData.safePayLevel || "Merchant",
-      joinedDate: merchantData.joinedDate || "",
       dispatchCity: merchantData.dispatchCity || merchantData.city || merchantData.state || ""
     };
 
@@ -5159,21 +5259,6 @@ function isHttpUrl(value: unknown): value is string {
   } catch {
     return false;
   }
-}
-
-function getMerchantGeo(merchant: any): { "@type": "GeoCoordinates"; latitude: number; longitude: number } | null {
-  const coordinates = merchant?.coordinates && typeof merchant.coordinates === "object"
-    ? merchant.coordinates
-    : {};
-  const latitude = Number(coordinates.latitude ?? coordinates.lat);
-  const longitude = Number(coordinates.longitude ?? coordinates.lng);
-  if (
-    !Number.isFinite(latitude) ||
-    !Number.isFinite(longitude) ||
-    latitude < -90 || latitude > 90 ||
-    longitude < -180 || longitude > 180
-  ) return null;
-  return { "@type": "GeoCoordinates", latitude, longitude };
 }
 
 function renderSeoHead(seo: PageSeo): string {
@@ -5282,7 +5367,6 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
     const image = isHttpUrl(merchant.avatarUrl || merchant.avatar_url)
       ? String(merchant.avatarUrl || merchant.avatar_url)
       : undefined;
-    const geo = getMerchantGeo(merchant);
     const schema = {
       "@context": "https://schema.org",
       "@type": "Store",
@@ -5291,13 +5375,9 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
       url: canonical,
       ...(image ? { image } : {}),
       ...(phone ? { telephone: `+${phone}` } : {}),
-      ...(geo ? { geo } : {}),
       description,
       address: {
         "@type": "PostalAddress",
-        ...(merchant.stallAddress || merchant.location
-          ? { streetAddress: String(merchant.stallAddress || merchant.location) }
-          : {}),
         addressLocality: String(merchant.city || city),
         ...(merchant.state ? { addressRegion: String(merchant.state) } : {}),
         addressCountry: "NG"
@@ -5592,15 +5672,15 @@ async function fetchLiveRegisteredMerchants(): Promise<any[]> {
             categories: [category, city, state, merchant.marketHub].filter(Boolean),
             product: merchant.product || "",
             bio: merchant.description || "",
-            avatarUrl: merchant.profilePhotoUrl || merchant.avatarUrl || getMerchantAvatar(name, category),
+            avatarUrl: merchant.publicAvatarUrl || getMerchantAvatar(name, category),
             rating: merchant.rating || 0,
             completedEscrows: merchant.completedEscrows || 0,
             activeStatus: "Active on WhatsApp",
             safePayLevel: verified ? "Verified Merchant" : "Not verified",
             joinedDate: merchant.registeredAt || "",
             dispatchCity: `${city}, ${state}`,
-            lat: merchant.lat || getCityCoordinates(city).lat,
-            lng: merchant.lng || getCityCoordinates(city).lng
+            lat: getCityCoordinates(city).lat,
+            lng: getCityCoordinates(city).lng
           };
         });
         liveMerchantsCache = mapped;
@@ -5614,7 +5694,7 @@ async function fetchLiveRegisteredMerchants(): Promise<any[]> {
 
   // 1. Direct Firestore Database Query (Authoritative Live Data)
   try {
-    const snap = await getDocs(collection(firestoreDb, "businesses"));
+    const snap = await adminFirestoreDb.collection("businesses").get();
     if (!snap.empty) {
       const mapped: any[] = [];
       snap.forEach((docSnap) => {
@@ -5652,15 +5732,15 @@ async function fetchLiveRegisteredMerchants(): Promise<any[]> {
           ],
           product: m.product || "",
           bio: m.bio || `${canonicalCategory} verified merchant with direct delivery and physical store pickup in ${city}.`,
-          avatarUrl: m.avatarUrl || m.avatar_url || m.selfieUrl || m.imageUrl || getMerchantAvatar(bizName, canonicalCategory),
+          avatarUrl: m.publicAvatarUrl || getMerchantAvatar(bizName, canonicalCategory),
           rating: m.rating || 4.96,
           completedEscrows: m.completedEscrows || (750 + (Math.abs(hashString(slug)) % 600)),
           activeStatus: m.activeStatus || "Active on WhatsApp now",
           safePayLevel: m.safePayLevel || "Verified Merchant",
           joinedDate: m.joinedDate || "Joined 2024",
           dispatchCity: `${city}, ${state}`,
-          lat: m.lat || getCityCoordinates(city).lat,
-          lng: m.lng || getCityCoordinates(city).lng
+          lat: getCityCoordinates(city).lat,
+          lng: getCityCoordinates(city).lng
         });
       });
 
@@ -5733,15 +5813,15 @@ async function fetchLiveRegisteredMerchants(): Promise<any[]> {
             ],
             product: m.product || "",
             bio: m.bio || `${canonicalCategory} verified merchant with direct delivery and physical store pickup in ${city}.`,
-            avatarUrl: m.avatarUrl || getMerchantAvatar(bizName, canonicalCategory),
+            avatarUrl: m.publicAvatarUrl || getMerchantAvatar(bizName, canonicalCategory),
             rating: m.rating || 4.96,
             completedEscrows: m.completedEscrows || (750 + (Math.abs(hashString(slug)) % 600)),
             activeStatus: "Active on WhatsApp now",
             safePayLevel: "Verified Merchant",
             joinedDate: "Joined 2024",
             dispatchCity: `${city}, ${state}`,
-            lat: m.lat || getCityCoordinates(city).lat,
-            lng: m.lng || getCityCoordinates(city).lng
+            lat: getCityCoordinates(city).lat,
+            lng: getCityCoordinates(city).lng
           };
         });
 
@@ -6668,7 +6748,7 @@ app.get("/api/storefront/spotlight-merchants", async (req, res) => {
 
 // Configure Vite middleware in development, serve static bundle in production
 // Direct Firestore connection status inspection endpoint
-app.get("/api/admin/firestore-status", async (req, res) => {
+app.get("/api/admin/firestore-status", requireAdminApiKey, async (req, res) => {
   try {
     const merchants = await fetchLiveRegisteredMerchants();
     const inventory = await fetchBackendInventory();

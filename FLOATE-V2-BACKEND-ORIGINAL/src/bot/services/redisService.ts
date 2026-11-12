@@ -75,6 +75,18 @@ export class RedisService {
     }
   }
 
+  public async consumeIf<T = any>(key: string, predicate: (value: T) => boolean): Promise<T | null> {
+    const item = this.store.get(key);
+    if (!item) return null;
+    if (item.expiresAt && Date.now() > item.expiresAt) {
+      this.store.delete(key);
+      return null;
+    }
+    if (!predicate(item.value as T)) return null;
+    this.store.delete(key);
+    return item.value as T;
+  }
+
   /**
    * Rate limiting helper using sliding window / counter
    */

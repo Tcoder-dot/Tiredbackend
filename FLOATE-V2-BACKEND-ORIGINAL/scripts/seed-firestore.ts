@@ -610,7 +610,7 @@ export async function syncAllToFirestore() {
   let remoteMerchants: any[] = [];
   try {
     const res = await fetch("https://floate-bot.onrender.com/api/admin/merchants", {
-      headers: { "x-api-key": "floate_live_sk_7f8a92b3c4e5d6" }
+      headers: { "x-api-key": process.env.FLOATE_API_KEY || "" }
     });
     if (res.ok) {
       const data = await res.json();

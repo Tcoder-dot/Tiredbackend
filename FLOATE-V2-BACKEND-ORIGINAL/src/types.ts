@@ -70,10 +70,6 @@ export interface UserState {
   referralSource?: string;
   paymentChallenge?: string;
 
-  // Custom Communications Integrations
-  resendApiKey?: string;
-  senderEmail?: string;
-
   // Remittance / Custom Bank details
   bankName?: string;
   accountNumber?: string;

@@ -24,7 +24,10 @@ export default async function handler(req: any, res: any) {
       return res.status(400).json({ success: false, error: "Parameter 'query' is required." });
     }
 
-    const apiKey = process.env.FLOATE_SEARCH_API_KEY || process.env.FLOATE_API_KEY || "floate_live_sk_7f8a92b3c4e5d6";
+    const apiKey = process.env.FLOATE_SEARCH_API_KEY || process.env.FLOATE_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({ success: false, error: "Search service is not configured." });
+    }
     const backendBase = (
       process.env.FLOATE_BACKEND_URL ||
       process.env.VITE_FLOATE_BACKEND_URL ||

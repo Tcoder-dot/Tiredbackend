@@ -86,6 +86,7 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
   const [otpSent, setOtpSent] = useState(false);
   const [otpCode, setOtpCode] = useState("");
   const [isPhoneVerified, setIsPhoneVerified] = useState(false);
+  const [registrationVerificationToken, setRegistrationVerificationToken] = useState("");
   const [isOtpLoading, setIsOtpLoading] = useState(false);
   const [businessDescription, setBusinessDescription] = useState<string>("");
   const [isDescriptionCustomized, setIsDescriptionCustomized] = useState<boolean>(false);
@@ -341,6 +342,7 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
       await sendRegistrationOtp(phone);
       setOtpSent(true);
       setIsPhoneVerified(false);
+      setRegistrationVerificationToken("");
     } catch (error) {
       setErrorMsg(error instanceof Error ? error.message : "Could not send a WhatsApp code.");
     } finally {
@@ -357,7 +359,8 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
 
     setIsOtpLoading(true);
     try {
-      await verifyRegistrationOtp(phone, otpCode);
+      const verificationToken = await verifyRegistrationOtp(phone, otpCode);
+      setRegistrationVerificationToken(verificationToken);
       setIsPhoneVerified(true);
     } catch (error) {
       setErrorMsg(error instanceof Error ? error.message : "The WhatsApp code could not be verified.");
@@ -453,7 +456,7 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
         }
       };
 
-      const result = await registerBusiness(payload);
+      const result = await registerBusiness(payload, registrationVerificationToken);
       if (!result.success) {
         throw new Error(result.error || result.message || "Registration could not be saved. Please try again.");
       }
@@ -682,6 +685,7 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
                       setOtpSent(false);
                       setOtpCode("");
                       setIsPhoneVerified(false);
+                      setRegistrationVerificationToken("");
                     }}
                     placeholder="e.g. 08031234567 or 8031234567"
                     className="w-full bg-[#FAF8F2] border border-slate-200 rounded-2xl pl-22 pr-4 py-3 text-sm text-[#13241F] placeholder-slate-400 font-bold focus:outline-none focus:border-[#0A4D3C]"

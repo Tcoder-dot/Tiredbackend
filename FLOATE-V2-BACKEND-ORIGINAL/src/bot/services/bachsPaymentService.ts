@@ -56,9 +56,9 @@ export class BachsPaymentService {
   private baseUrl: string;
 
   constructor() {
-    this.apiKey = process.env.BACHS_API_KEY || (config as any).bachsApiKey || 'bachs_live_pub_key_2026';
-    this.secretKey = process.env.BACHS_SECRET_KEY || (config as any).bachsSecretKey || 'bachs_live_sec_key_2026';
-    this.webhookSecret = process.env.BACHS_WEBHOOK_SECRET || (config as any).bachsWebhookSecret || 'bachs_webhook_secret_floate_2026';
+    this.apiKey = process.env.BACHS_API_KEY || '';
+    this.secretKey = process.env.BACHS_SECRET_KEY || '';
+    this.webhookSecret = process.env.BACHS_WEBHOOK_SECRET || '';
     this.baseUrl = process.env.BACHS_BASE_URL || 'https://api.bachs.io/v1';
   }
 
@@ -66,7 +66,7 @@ export class BachsPaymentService {
    * Check if Bachs.io API keys are configured
    */
   public isConfigured(): boolean {
-    return Boolean(this.apiKey && this.secretKey && !this.apiKey.includes('dummy'));
+    return Boolean(this.apiKey && this.secretKey && this.webhookSecret);
   }
 
   /**

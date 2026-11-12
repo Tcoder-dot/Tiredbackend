@@ -1,9 +1,7 @@
 import { Router, Request, Response, RequestHandler } from "express";
 import { GoogleGenAI, Type } from "@google/genai";
-import { collection, getDocs, doc, getDoc } from "firebase/firestore";
 import type { DocumentSnapshot } from "firebase-admin/firestore";
-import { randomInt, timingSafeEqual } from "node:crypto";
-import { firestoreDb } from "../server";
+import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { adminFirestoreDb } from "../services/adminFirestore";
 import { createMerchantSlug } from "../src/utils/merchantSlug";
 import { normalizeWhatsAppNumber } from "../src/utils/whatsapp";
@@ -26,6 +24,21 @@ const requireAdminApiKey: RequestHandler = (req, res, next) => {
   if (expectedBuffer.length !== providedBuffer.length || !timingSafeEqual(expectedBuffer, providedBuffer)) {
     return res.status(401).json({ success: false, error: "Admin authentication required." });
   }
+  next();
+};
+
+const requireWhatsAppBearer: RequestHandler = (req, res, next) => {
+  const rawToken = (req.get("authorization") || "").match(/^Bearer\s+(\S+)$/i)?.[1];
+  const decoded = rawToken ? whatsappAuthService.verifyJwtToken(rawToken) : null;
+  const phone = normalizeWhatsAppNumber(decoded?.phone);
+  if (!phone) {
+    return res.status(401).json({ success: false, error: "A valid WhatsApp session is required." });
+  }
+  const requestedPhone = normalizeWhatsAppNumber(req.method === "GET" ? req.query.phone : req.body?.phone || req.body?.whatsapp);
+  if (requestedPhone && requestedPhone !== phone) {
+    return res.status(403).json({ success: false, error: "The phone must match the authenticated WhatsApp account." });
+  }
+  (req as Request & { verifiedWhatsAppPhone?: string }).verifiedWhatsAppPhone = phone;
   next();
 };
 
@@ -506,7 +519,7 @@ const SEED_MERCHANTS = [
 // Helper: Query all verified merchants (Firestore with SEED fallback)
 async function getAllMerchants(): Promise<any[]> {
   try {
-    const snap = await getDocs(collection(firestoreDb, "businesses"));
+    const snap = await adminFirestoreDb.collection("businesses").get();
     if (!snap.empty) {
       const list: any[] = [];
       snap.forEach((docSnap) => {
@@ -514,6 +527,9 @@ async function getAllMerchants(): Promise<any[]> {
         const bizName = d.businessName || d.name || "Verified Merchant";
         const slug = d.slug || docSnap.id;
         const city = d.city || "Lagos";
+        const status = String(d.verificationStatus || d.verification_status || "").toUpperCase();
+        const verified = ["APPROVED", "VERIFIED"].includes(status) ||
+          (!status && (d.verified === true || d.isVerified === true));
         list.push({
           id: docSnap.id,
           slug,
@@ -521,13 +537,14 @@ async function getAllMerchants(): Promise<any[]> {
           city,
           state: d.state || "Nigeria",
           category: d.primaryCategory || d.category || "General Merchandise",
-          verified: d.verified !== undefined ? Boolean(d.verified) : true,
+          verified,
+          verificationStatus: status || (verified ? "APPROVED" : "PENDING_REVIEW"),
           is_spotlight: Boolean(d.is_spotlight || d.isSpotlight),
-          avatar_url: d.avatarUrl || d.avatar_url || d.selfieUrl || d.imageUrl || "",
-          bio: d.bio || `Verified merchant in ${city}, providing physical pickup and fast dispatch.`,
+          avatar_url: d.publicAvatarUrl || "",
+          bio: d.bio || d.description || "",
           whatsapp_number: d.whatsappNumber || d.whatsapp || d.phone || d.whatsapp_number || "",
-          rating: d.rating || 4.96,
-          completed_escrows: d.completedEscrows || d.completed_escrows || 850,
+          rating: Number(d.rating) || 0,
+          completed_escrows: Number(d.completedEscrows || d.completed_escrows) || 0,
           statuses: Array.isArray(d.statuses) ? d.statuses : [],
           products: Array.isArray(d.products) ? d.products : []
         });
@@ -580,7 +597,7 @@ export async function getAllProducts(): Promise<any[]> {
   }
 
   try {
-    const productSnapshot = await getDocs(collection(firestoreDb, "products"));
+    const productSnapshot = await adminFirestoreDb.collection("products").get();
     productSnapshot.forEach((productDoc) => {
       const product = productDoc.data();
       const id = String(product.id || productDoc.id);
@@ -1750,25 +1767,55 @@ router.delete("/api/v1/saved-shops/:vendor_id", (req: Request, res: Response) =>
 // ----------------------------------------------------
 const BACKEND_BASE = (process.env.FLOATE_UPSTREAM_BACKEND_URL || "").replace(/\/+$/, "");
 
-router.get(["/verify/session", "/api/v1/verify/session"], async (req: Request, res: Response) => {
-  const token = req.query.token as string;
+router.get(["/verify/session", "/api/v1/verify/session"], requireWhatsAppBearer, async (req: Request, res: Response) => {
+  if (!BACKEND_BASE) {
+    return res.status(503).json({ success: false, valid: false, error: "Verification backend is not configured." });
+  }
   try {
-    const remoteRes = await fetch(`${BACKEND_BASE}/verify/session?token=${encodeURIComponent(token || "")}`);
-    const data = await remoteRes.json();
+    const url = new URL(`${BACKEND_BASE}/verify/session`);
+    for (const [key, value] of Object.entries(req.query)) {
+      if (typeof value === "string") url.searchParams.set(key, value);
+    }
+    url.searchParams.set("phone", (req as Request & { verifiedWhatsAppPhone?: string }).verifiedWhatsAppPhone || "");
+    const remoteRes = await fetch(url, {
+      headers: { Accept: "application/json", Authorization: req.get("authorization") || "" }
+    });
+    const data = await remoteRes.json().catch(() => null);
+    if (remoteRes.ok) {
+      const session = data?.session || data;
+      const phone = normalizeWhatsAppNumber(session?.phone || session?.whatsapp);
+      const authenticatedPhone = (req as Request & { verifiedWhatsAppPhone?: string }).verifiedWhatsAppPhone;
+      if (!(data?.valid === true || session?.valid === true) || phone !== authenticatedPhone) {
+        return res.status(phone && phone !== authenticatedPhone ? 403 : 401).json({
+          success: false,
+          valid: false,
+          error: "The verification session is invalid or does not match the authenticated WhatsApp account."
+        });
+      }
+    }
     return res.status(remoteRes.status).json(data);
   } catch (err: any) {
     return res.status(502).json({ success: false, message: err?.message || "Failed to reach backend verification service" });
   }
 });
 
-router.post(["/verify/submit", "/api/v1/verify/submit"], async (req: Request, res: Response) => {
+router.post(["/verify/submit", "/api/v1/verify/submit"], requireWhatsAppBearer, async (req: Request, res: Response) => {
+  if (!BACKEND_BASE) {
+    return res.status(503).json({ success: false, error: "Verification backend is not configured." });
+  }
   try {
     const remoteRes = await fetch(`${BACKEND_BASE}/verify/submit`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req.body)
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: req.get("authorization") || ""
+      },
+      body: JSON.stringify({
+        ...req.body,
+        phone: (req as Request & { verifiedWhatsAppPhone?: string }).verifiedWhatsAppPhone
+      })
     });
-    const data = await remoteRes.json();
+    const data = await remoteRes.json().catch(() => null);
     return res.status(remoteRes.status).json(data);
   } catch (err: any) {
     return res.status(502).json({ success: false, message: err?.message || "Failed to submit verification to backend" });
@@ -2122,6 +2169,31 @@ async function consumeWhatsAppOtp(canonicalPhone: string, code: string): Promise
   return true;
 }
 
+const REGISTRATION_VERIFICATION_TTL_SECONDS = 600;
+
+async function createRegistrationVerificationToken(phone: string): Promise<string> {
+  const token = randomBytes(32).toString("base64url");
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const stored = await redisService.set(
+    `registration_phone_verification:${tokenHash}`,
+    { phone, expiresAt: Date.now() + REGISTRATION_VERIFICATION_TTL_SECONDS * 1000 },
+    REGISTRATION_VERIFICATION_TTL_SECONDS
+  );
+  if (!stored) throw new Error("Could not save phone verification proof.");
+  return token;
+}
+
+export async function consumeRegistrationVerificationToken(phone: string, token: string): Promise<boolean> {
+  if (!token || token.length > 128) return false;
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const key = `registration_phone_verification:${tokenHash}`;
+  const record = await redisService.consumeIf<{ phone: string; expiresAt: number }>(
+    key,
+    (value) => value.expiresAt > Date.now() && value.phone === phone
+  );
+  return record !== null;
+}
+
 router.post(["/api/v1/auth/whatsapp/request-code", "/api/auth/whatsapp/request-code"], async (req: Request, res: Response) => {
   const phone = String(req.body?.phone || req.body?.phoneNumber || "").trim();
   if (!phone) return res.status(400).json({ success: false, error: "Phone number is required." });
@@ -2200,7 +2272,31 @@ router.post(["/api/auth/whatsapp/verify", "/auth/whatsapp/verify"], async (req: 
       return res.status(400).json({ success: false, error: "Verification code is invalid or expired." });
     }
 
-    return res.json({ success: true, verified: true, message: "WhatsApp phone verified successfully." });
+    const verificationToken = await createRegistrationVerificationToken(canonical);
+    return res.json({
+      success: true,
+      verified: true,
+      verificationToken,
+      message: "WhatsApp phone verified successfully."
+    });
+  } catch (error: any) {
+    return res.status(503).json({ success: false, error: error.message || "Phone verification is unavailable." });
+  }
+});
+
+router.post("/api/auth/whatsapp/consume-registration-verification", async (req: Request, res: Response) => {
+  const phone = String(req.body?.phoneNumber || req.body?.phone || "").trim();
+  const token = String(req.body?.verificationToken || "").trim();
+  if (!phone || !token) {
+    return res.status(400).json({ success: false, error: "Verified phone and registration proof are required." });
+  }
+
+  try {
+    const { canonical } = formatPhoneNumber(phone);
+    if (!await consumeRegistrationVerificationToken(canonical, token)) {
+      return res.status(401).json({ success: false, error: "Phone verification proof is invalid, expired, or already used." });
+    }
+    return res.json({ success: true, phone: canonical });
   } catch (error: any) {
     return res.status(503).json({ success: false, error: error.message || "Phone verification is unavailable." });
   }

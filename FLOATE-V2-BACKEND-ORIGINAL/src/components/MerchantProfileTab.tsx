@@ -27,8 +27,6 @@ export default function MerchantProfileTab({
   const [bankName, setBankName] = useState(user.bankName || '');
   const [accountNumber, setAccountNumber] = useState(user.accountNumber || '');
   const [accountName, setAccountName] = useState(user.accountName || '');
-  const [resendApiKey, setResendApiKey] = useState(user.resendApiKey || '');
-  const [senderEmail, setSenderEmail] = useState(user.senderEmail || '');
   const [saving, setSaving] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -45,9 +43,7 @@ export default function MerchantProfileTab({
         businessAddress,
         bankName,
         accountNumber,
-        accountName,
-        resendApiKey,
-        senderEmail
+        accountName
       });
     } catch (err) {
       console.error(err);

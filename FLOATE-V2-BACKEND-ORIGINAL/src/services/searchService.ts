@@ -14,12 +14,7 @@ export const RENDER_BACKEND_URL = FLOATE_BACKEND_URL;
 
 export const FLOATE_API_URL = RENDER_BACKEND_URL;
 
-export const FLOATE_SEARCH_API_KEY: string = (
-  (typeof import.meta !== "undefined" && import.meta.env?.VITE_FLOATE_API_KEY) ||
-  (typeof import.meta !== "undefined" && import.meta.env?.VITE_FLOATE_SEARCH_API_KEY) ||
-  (typeof process !== "undefined" && process.env?.FLOATE_SEARCH_API_KEY) ||
-  "floate_live_sk_7f8a92b3c4e5d6"
-);
+export const FLOATE_SEARCH_API_KEY = "";
 
 export interface SearchBackendResult {
   success: boolean;

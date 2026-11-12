@@ -82,6 +82,9 @@ export class WhatsAppAuthService {
       process.env.FLOATE_JWT_SECRET ||
       process.env.JWT_SECRET ||
       '';
+    if (this.jwtSecret.length < 32) {
+      throw new Error('FLOATE_JWT_SECRET or JWT_SECRET must be configured with at least 32 characters.');
+    }
   }
 
   /**

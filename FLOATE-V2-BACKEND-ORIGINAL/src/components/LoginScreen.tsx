@@ -24,7 +24,7 @@ export default function LoginScreen({ onLoginSuccess, onBackToLanding, isFiresto
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState('chukwuemekarich24@gmail.com');
   const [name, setName] = useState('Emeka Rich');
-  const [password, setPassword] = useState('password123');
+  const [password, setPassword] = useState('');
   const [selectedPlan, setSelectedPlan] = useState<'FREE' | 'HUSTLER' | 'MERCHANT' | 'ENTERPRISE'>('FREE');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -170,7 +170,13 @@ export default function LoginScreen({ onLoginSuccess, onBackToLanding, isFiresto
   const handleAuthentication = async (targetEmail: string, targetName: string, desiredPlan: 'FREE' | 'HUSTLER' | 'MERCHANT') => {
     setIsLoading(true);
     setError('');
-    const targetPassword = password.length >= 6 ? password : 'password123';
+    const minimumPasswordLength = isSignUp ? 8 : 6;
+    if (password.length < minimumPasswordLength) {
+      setError(`Password must be at least ${minimumPasswordLength} characters.`);
+      setIsLoading(false);
+      return;
+    }
+    const targetPassword = password;
     
     try {
       let userCredential;

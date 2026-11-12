@@ -170,15 +170,23 @@ export const VerificationPage: React.FC<VerificationPageProps> = ({
       setSubmitError("Please capture or upload a clear photo proof of your storefront or goods.");
       return;
     }
+    if (sessionData?.valid !== true) {
+      setSubmitError("A valid verification session is required before submitting evidence.");
+      return;
+    }
 
-    const cleanPhone = String(phone || sessionData?.whatsapp || "2348000000000").replace(/[^0-9]/g, "");
+    const cleanPhone = String(phone || sessionData.whatsapp || "").replace(/[^0-9]/g, "");
+    if (!cleanPhone) {
+      setSubmitError("The verified WhatsApp phone number is missing. Please reload the verification link.");
+      return;
+    }
     const intlPhone = cleanPhone.startsWith("0") ? "234" + cleanPhone.slice(1) : (cleanPhone.startsWith("234") ? cleanPhone : "234" + cleanPhone);
 
     setIsSubmitting(true);
     try {
       const payload = {
-        token: token || `tok_${Date.now()}`,
-        ref: refParam || `REF-${Math.floor(100000 + Math.random() * 900000)}`,
+        token: token || sessionData.token || "",
+        ref: refParam || sessionData.ref || "",
         phone: intlPhone,
         verificationType,
         photoBase64,
@@ -187,7 +195,7 @@ export const VerificationPage: React.FC<VerificationPageProps> = ({
       };
 
       const res = await submitVisualVerification(payload);
-      if (res && res.success !== false) {
+      if (res?.success === true) {
         setActivatedBadgeUrl(res.badgeUrl || "https://i.postimg.cc/mkSLsdxb/20260929-122817.jpg");
         setSubmitSuccess(true);
         window.scrollTo({ top: 0, behavior: "smooth" });
@@ -201,7 +209,7 @@ export const VerificationPage: React.FC<VerificationPageProps> = ({
     }
   };
 
-  const cleanPhone = String(phone || sessionData?.whatsapp || "2348030000000").replace(/[^0-9]/g, "");
+  const cleanPhone = String(phone || sessionData?.whatsapp || "").replace(/[^0-9]/g, "");
   const intlPhone = cleanPhone.startsWith("0") ? "234" + cleanPhone.slice(1) : (cleanPhone.startsWith("234") ? cleanPhone : "234" + cleanPhone);
   const waReturnUrl = `https://wa.me/${intlPhone}?text=Hello%20Floate,%20my%20store%20visual%20verification%20has%20been%20submitted%20and%20approved!`;
 

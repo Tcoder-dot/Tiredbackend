@@ -11,7 +11,7 @@ import { createMerchantSlug } from "../utils/merchantSlug";
  */
 export const FLOATE_API_URL: string = FLOATE_BACKEND_URL;
 
-export const FLOATE_API_KEY = "floate_live_sk_7f8a92b3c4e5d6";
+export const FLOATE_API_KEY = "";
 
 function resolveBackendMediaUrl(value?: string): string {
   const url = value?.trim();
@@ -200,9 +200,13 @@ export interface RegisterBusinessResponse {
  * 1. Register Business Form API
  * POST ${NEXT_PUBLIC_FLOATE_API_URL}/api/register/business
  */
-export async function registerBusiness(payload: RegisterBusinessPayload): Promise<RegisterBusinessResponse> {
+export async function registerBusiness(
+  payload: RegisterBusinessPayload,
+  registrationVerificationToken: string
+): Promise<RegisterBusinessResponse> {
   const businessSlug = createMerchantSlug(payload.businessName);
   const bodyData = {
+    registrationVerificationToken,
     businessName: payload.businessName.trim(),
     ownerName: payload.ownerName.trim(),
     phone: payload.phone.trim(),
@@ -338,11 +342,15 @@ export async function sendRegistrationOtp(phone: string): Promise<void> {
   await postWhatsAppAuth("/api/auth/whatsapp/send-otp", { phoneNumber: sanitizeIntlPhone(phone) });
 }
 
-export async function verifyRegistrationOtp(phone: string, otp: string): Promise<void> {
-  await postWhatsAppAuth("/api/auth/whatsapp/verify", {
+export async function verifyRegistrationOtp(phone: string, otp: string): Promise<string> {
+  const response = await postWhatsAppAuth("/api/auth/whatsapp/verify", {
     phoneNumber: sanitizeIntlPhone(phone),
     otp: otp.trim()
   });
+  if (typeof response.verificationToken !== "string" || !response.verificationToken) {
+    throw new Error("Phone verification did not return a registration proof. Please retry.");
+  }
+  return response.verificationToken;
 }
 
 export interface AddProductPayload {

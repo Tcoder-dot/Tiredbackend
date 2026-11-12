@@ -94,15 +94,17 @@ export const SearchConsoleSection: React.FC = () => {
           : null;
 
         if (rawCount !== null) {
-          if (rawCount < 160) {
+          if (typeof data.totalUsersLinked !== 'number' || typeof data.totalSearches !== 'number') {
             setDoc(statsDocRef, {
               totalUsersLinked: 160,
               totalSearches: 160,
               lastUpdated: new Date().toISOString()
-            }, { merge: true }).catch(() => {});
+            }, { merge: true }).catch(err => {
+              console.warn('Could not migrate stats doc:', err);
+            });
             setLinkedUsersCount(160);
           } else {
-            setLinkedUsersCount(rawCount);
+            setLinkedUsersCount(Math.max(160, rawCount));
           }
         }
       } else {
