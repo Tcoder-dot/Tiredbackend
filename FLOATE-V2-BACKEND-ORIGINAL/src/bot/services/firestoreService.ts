@@ -184,6 +184,9 @@ export interface MerchantDoc {
   category?: string;
   description?: string;
   listingType?: string;
+  price?: string;
+  negotiation?: 'Yes' | 'No';
+  productCount?: number;
   isVerified?: boolean;
   identityVerified?: boolean;
   product?: string;
@@ -607,10 +610,9 @@ export class FirestoreService {
   }
 
   /**
-   * Primary Data Migration: Migrates existing business listings from Google Sheets into Firestore (merchants and products collections).
-   * Google Sheets becomes a passive backup.
+   * Reconciles existing Firestore listings with merchant records.
    */
-  public async migrateSheetsToFirestore(): Promise<{
+  public async reconcileListingsToFirestore(): Promise<{
     success: boolean;
     totalListingsFound: number;
     merchantsMigrated: number;
@@ -629,19 +631,22 @@ export class FirestoreService {
       error?: string;
     }>(
       async () => {
-        console.log('[Migration] Starting migration from Google Sheets to Firestore...');
+        console.log('[Firestore] Starting listing reconciliation...');
         let listings = await sheetsDb.getAllListings();
         if (!listings || listings.length === 0) {
-          listings = await sheetsDb.syncListingsFromSheets();
+          listings = await sheetsDb.syncListingsFromFirestore();
         }
 
-        console.log(`[Migration] Found ${listings.length} listings to migrate into Firestore.`);
+        console.log(`[Firestore] Found ${listings.length} listings to reconcile.`);
         let merchantsCount = 0;
         let productsCount = 0;
         const sampleMerchants: string[] = [];
 
         for (const listing of listings) {
-          const merchantId = listing.id || listing.whatsapp || normalizePhone(listing.whatsapp);
+          const existingMerchant = listing.whatsapp
+            ? await this.getMerchant(listing.whatsapp)
+            : null;
+          const merchantId = existingMerchant?.id || listing.id || listing.whatsapp || normalizePhone(listing.whatsapp);
           if (!merchantId) continue;
 
           // A. Merchant Document
@@ -702,7 +707,7 @@ export class FirestoreService {
           }
         }
 
-        console.log(`[Migration Complete] Successfully migrated ${merchantsCount} merchants and ${productsCount} products into Firestore.`);
+        console.log(`[Firestore] Reconciled ${merchantsCount} merchants and ${productsCount} products.`);
         return {
           success: true,
           totalListingsFound: listings.length,
@@ -715,7 +720,7 @@ export class FirestoreService {
       {
         timeoutMs: 9500,
         serviceName: 'Firestore',
-        operationName: 'migrateSheetsToFirestore',
+        operationName: 'reconcileListingsToFirestore',
         fallbackValue: {
           success: false,
           totalListingsFound: 0,
@@ -730,13 +735,16 @@ export class FirestoreService {
   }
 
   /**
-   * Syncs / seeds merchants from Google Sheets listings into Firestore
+   * Saves listing data to the Firestore merchants collection.
    */
   public async syncMerchantsFromListings(listings: BusinessListing[]): Promise<void> {
     return withExternalTimeout(
       async () => {
         for (const listing of listings) {
-          const merchantId = listing.id || listing.whatsapp || normalizePhone(listing.whatsapp);
+          const existingMerchant = listing.whatsapp
+            ? await this.getMerchant(listing.whatsapp)
+            : null;
+          const merchantId = existingMerchant?.id || listing.id || listing.whatsapp || normalizePhone(listing.whatsapp);
           if (!merchantId) continue;
 
           const merchantRef = doc(db, 'merchants', merchantId);
@@ -760,6 +768,10 @@ export class FirestoreService {
               city: listing.city || '',
               category: listing.category || '',
               listingType: listing.listingType || '',
+              product: listing.product || '',
+              price: listing.price || '',
+              negotiation: listing.negotiation,
+              productCount: listing.productCount || 1,
               isVerified: vStatus === 'YES' || listing.isVerified || false,
               credit_balance: this.defaultInitialCredits,
               status: 'ACTIVE',
@@ -774,6 +786,11 @@ export class FirestoreService {
             if (listing.state) updates.state = listing.state;
             if (listing.city) updates.city = listing.city;
             if (listing.category) updates.category = listing.category;
+            if (listing.listingType) updates.listingType = listing.listingType;
+            if (listing.product) updates.product = listing.product;
+            if (listing.price) updates.price = listing.price;
+            if (listing.negotiation) updates.negotiation = listing.negotiation;
+            if (listing.productCount) updates.productCount = listing.productCount;
             if (listing.ownerFullName) updates.ownerFullName = listing.ownerFullName;
             if (listing.userId !== undefined) updates.userId = listing.userId;
             if (tgId !== undefined) updates.telegramId = tgId;
@@ -825,6 +842,36 @@ export class FirestoreService {
         fallbackValue: undefined,
       }
     );
+  }
+
+  public async logBotInteraction(data: {
+    timestamp: string;
+    userId: number | string;
+    username: string;
+    type: string;
+    content: string;
+  }): Promise<void> {
+    const id = `bot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await setDoc(doc(db, 'bot_logs', id), { id, ...data });
+  }
+
+  public async getBotInteractions(): Promise<Array<{
+    timestamp: string;
+    userId: number | string;
+    username: string;
+    type: string;
+    content: string;
+  }>> {
+    const snapshot = await getDocs(collection(db, 'bot_logs'));
+    return snapshot.docs
+      .map((log) => log.data() as {
+        timestamp: string;
+        userId: number | string;
+        username: string;
+        type: string;
+        content: string;
+      })
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   }
 
   /**
@@ -985,7 +1032,7 @@ export class FirestoreService {
           }
         }
 
-        // 3. Fallback: Lookup Google Sheets / Seed Listings by phone or business name
+        // 3. Fallback: Lookup the Firestore-backed listing cache by phone or business name
         let matchingListing: BusinessListing | null = null;
         if (docsFound.length === 0) {
           for (const v of variants) {
@@ -1000,7 +1047,7 @@ export class FirestoreService {
           }
         }
 
-        // If found in Sheets but not in Firestore, bootstrap Firestore merchant doc
+        // If found in the listing cache but not in Firestore, bootstrap the merchant document.
         if (docsFound.length === 0 && matchingListing) {
           const rawW = matchingListing.whatsapp || key;
           const clean10 = rawW.replace(/\D/g, '').slice(-10);
@@ -1039,7 +1086,7 @@ export class FirestoreService {
               }));
             }
           } catch (err) {
-            console.warn('[Firestore] Notice caching sheets merchant:', err);
+            console.warn('[Firestore] Notice caching listing merchant:', err);
           }
           return newMerchant;
         }
@@ -1644,8 +1691,7 @@ export class FirestoreService {
       });
 
       if (result.success && result.lead) {
-        // Trigger Google Sheets Passive Mirroring in background
-        this.mirrorToGoogleSheets('LEAD_DEDUCTION', {
+        this.logCommerceEvent('LEAD_DEDUCTION', {
           merchantName: result.lead.merchantName,
           amount: result.lead.cost,
           newBalance: result.merchant?.credit_balance ?? 0,
@@ -1731,8 +1777,7 @@ export class FirestoreService {
         };
       });
 
-      // Passive mirroring to Google Sheets
-      this.mirrorToGoogleSheets('TOPUP', {
+      this.logCommerceEvent('TOPUP', {
         merchantName: result.merchantName,
         amount: amountNGN,
         newBalance: result.newBalance,
@@ -1851,8 +1896,7 @@ export class FirestoreService {
         }
       }
 
-      // Passive mirroring to Google Sheets
-      this.mirrorToGoogleSheets('TOPUP', {
+      this.logCommerceEvent('TOPUP', {
         merchantName: result.merchantName,
         amount: amountPaidNGN,
         newBalance: result.newBalance,
@@ -1982,10 +2026,9 @@ export class FirestoreService {
   }
 
   /**
-   * Passive Google Sheets Mirroring
-   * Does NOT block runtime calculations or introduce race conditions
+   * Records commerce events in Firestore.
    */
-  private async mirrorToGoogleSheets(
+  private async logCommerceEvent(
     eventType: 'LEAD_DEDUCTION' | 'TOPUP',
     data: {
       merchantName: string;
@@ -2010,7 +2053,7 @@ export class FirestoreService {
         `${data.merchantName} - ${summary}`
       );
     } catch (err) {
-      console.warn('[Google Sheets Mirror Notice] Failed passive stream:', err);
+      console.warn('[Firestore] Failed to record commerce event:', err);
     }
   }
 
@@ -2142,22 +2185,6 @@ export class FirestoreService {
       batch.set(doc(db, 'products', prodId), storefrontProduct);
       batch.set(doc(db, 'businesses', businessId), businessRecord, { merge: true });
       await batch.commit();
-
-      // Pending and rejected merchants stay out of the Sheets auto-verification path.
-      if (currentMerchant.status !== 'PENDING_REVIEW') {
-        sheetsDb.registerBusiness({
-          userId: data.userId,
-          businessName: data.businessName,
-          whatsapp: data.whatsapp,
-          state: data.state,
-          city: data.city,
-          listingType: data.listingType,
-          category: data.category,
-          product: data.product,
-          price: data.price,
-          negotiation: data.negotiation,
-        }).catch((e) => console.warn('[Firestore -> Sheets Dual Write Notice]:', e?.message));
-      }
 
     } catch (err) {
       console.error('[Firestore] Error saving product listing:', err);
@@ -2653,6 +2680,8 @@ export class FirestoreService {
           docId === queryKey ||
           docId.includes(queryKey) ||
           (data.id && String(data.id).toLowerCase().includes(queryKey)) ||
+          (data.userId !== undefined && String(data.userId).toLowerCase() === queryKey) ||
+          (data.telegramId !== undefined && String(data.telegramId).toLowerCase() === queryKey) ||
           (data.whatsapp && String(data.whatsapp).toLowerCase().includes(queryKey)) ||
           (data.businessName && data.businessName.toLowerCase().includes(queryKey))
         ) {
@@ -2672,6 +2701,7 @@ export class FirestoreService {
         if (
           pId === queryKey ||
           pId.includes(queryKey) ||
+          (data.userId !== undefined && String(data.userId).toLowerCase() === queryKey) ||
           (data.merchantId && String(data.merchantId).toLowerCase().includes(queryKey)) ||
           (data.whatsapp && String(data.whatsapp).toLowerCase().includes(queryKey)) ||
           (data.businessName && data.businessName.toLowerCase().includes(queryKey))
@@ -2683,6 +2713,7 @@ export class FirestoreService {
       }
     } catch (err) {
       console.error(`[Firestore Notice] Delete merchant check for "${merchantIdOrQuery}":`, err);
+      throw err;
     }
     return { deletedMerchant, deletedProductsCount };
   }
@@ -2737,6 +2768,56 @@ export class FirestoreService {
       console.error(`[Firestore] Error updating product ${productId}:`, err);
       return false;
     }
+  }
+
+  public async updateListingRecord(id: string, updates: Partial<BusinessListing>): Promise<boolean> {
+    try {
+      const productRef = doc(db, 'products', id);
+      const productSnapshot = await getDoc(productRef);
+      if (productSnapshot.exists()) {
+        await updateDoc(productRef, this.sanitizeForFirestore({
+          ...updates,
+          updatedAt: new Date().toISOString(),
+        }));
+        return true;
+      }
+
+      const merchantRef = doc(db, 'merchants', id);
+      const merchantSnapshot = await getDoc(merchantRef);
+      if (!merchantSnapshot.exists()) return false;
+      await updateDoc(merchantRef, this.sanitizeForFirestore({
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      }));
+      return true;
+    } catch (err) {
+      console.error(`[Firestore] Error updating listing ${id}:`, err);
+      throw err;
+    }
+  }
+
+  public async updateMerchantWhatsappForUser(userId: number | string, whatsapp: string): Promise<number> {
+    const userKey = String(userId);
+    const now = new Date().toISOString();
+    const merchantsSnapshot = await getDocs(collection(db, 'merchants'));
+    const matchedMerchants = merchantsSnapshot.docs.filter((merchant) => {
+      const data = merchant.data() as MerchantDoc;
+      return String(data.userId || '') === userKey || String(data.telegramId || '') === userKey;
+    });
+    const phoneVariants = new Set(
+      matchedMerchants.map((merchant) => normalizePhone((merchant.data() as MerchantDoc).whatsapp)).filter(Boolean)
+    );
+    const productsSnapshot = await getDocs(collection(db, 'products'));
+    const matchedProducts = productsSnapshot.docs.filter((product) => {
+      const data = product.data() as ProductDoc;
+      return String(data.userId || '') === userKey || phoneVariants.has(normalizePhone(data.whatsapp));
+    });
+
+    await Promise.all([
+      ...matchedMerchants.map((merchant) => updateDoc(merchant.ref, { whatsapp, updatedAt: now })),
+      ...matchedProducts.map((product) => updateDoc(product.ref, { whatsapp, updatedAt: now })),
+    ]);
+    return matchedMerchants.length + matchedProducts.length;
   }
 
   public async updateProductForMerchant(
@@ -4203,10 +4284,10 @@ export class FirestoreService {
         console.warn('[Admin Metrics] Notice querying merchants:', e);
       }
 
-      // Fallback merchants from sheets if Firestore empty
+      // Fallback to the Firestore-backed listing cache if no merchant documents are available.
       if (merchants.length === 0) {
-        const sheetsListings = sheetsDb.getAllListings();
-        merchants = sheetsListings.map(l => ({
+        const cachedListings = sheetsDb.getAllListings();
+        merchants = cachedListings.map(l => ({
           id: l.id || l.whatsapp,
           businessName: l.businessName,
           whatsapp: l.whatsapp,
@@ -4424,10 +4505,10 @@ export class FirestoreService {
       console.warn('[Admin List Merchants Error]:', e);
     }
 
-    // Fallback to Google Sheets listings if Firestore collection is empty or timed out
+    // Fallback to the Firestore-backed listing cache if the products collection is empty.
     try {
-      const sheetsListings = sheetsDb.getAllListings();
-      return sheetsListings.slice(0, limitCount).map((l) => ({
+      const cachedListings = sheetsDb.getAllListings();
+      return cachedListings.slice(0, limitCount).map((l) => ({
         id: l.id || l.whatsapp,
         businessName: l.businessName,
         whatsapp: l.whatsapp,

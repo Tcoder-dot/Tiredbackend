@@ -1,13 +1,13 @@
 /**
  * Centralized Timeout & Resilience Service
- * Enforces an explicit 8-10 second timeout on every external call (Firestore, Gemini, Meilisearch, Redis, Sheets)
+ * Enforces an explicit 8-10 second timeout on every external call (Firestore, Gemini, Meilisearch, Redis)
  * to guarantee no call ever hangs silently.
  */
 
 export interface TimeoutOptions<T> {
   timeoutMs?: number; // Default 8500ms (between 8-10 seconds)
   fallbackValue?: T | (() => T | Promise<T>);
-  serviceName: 'Firestore' | 'Gemini' | 'Meilisearch' | 'Redis' | 'GoogleSheets' | 'ExternalAPI';
+  serviceName: 'Firestore' | 'Gemini' | 'Meilisearch' | 'Redis' | 'ExternalAPI';
   operationName: string;
   silentFallback?: boolean;
 }

@@ -2080,7 +2080,7 @@ export async function handleCreateInstantSafePayDeal(
     }
   }
 
-  // 4. Resolve from Sheets DB if counterpartyName was typed and no phone was provided
+  // 4. Resolve from the Firestore-backed listing cache if no phone was provided.
   if (!hasExplicitCounterpartyPhone && counterpartyName && !isAboveVendorRef && initiatorRole === 'BUYER') {
     const listing = sheetsDb.getListingBySlugOrName(counterpartyName) || sheetsDb.getListingById(counterpartyName);
     if (listing?.whatsapp) {
@@ -4425,8 +4425,8 @@ export async function processMasterWhatsAppEngine(params: {
           price: pending.price || 'Market Rate',
           negotiation: (pending.negotiation as any) || 'Yes',
         });
-      } catch (sheetError) {
-        console.warn('[WhatsApp Admin Approval Sheets Sync Error]:', sheetError);
+      } catch (firestoreError) {
+        console.warn('[WhatsApp Admin Approval Firestore Error]:', firestoreError);
       }
 
       const dashboardUrl = `${getFrontendWebUrl().replace(/\/+$/, '')}/merchant/dashboard?slug=${encodeURIComponent(normalizePhone(pending.whatsapp))}`;
@@ -7321,7 +7321,7 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
     return;
   }
 
-  // 2. Query Firestore / Google Sheets for matching verified businesses
+  // 2. Query Firestore-backed merchant and product listings.
   let searchResults;
   try {
     searchResults = await sheetsDb.searchBusinessListings(
@@ -7658,7 +7658,7 @@ async function handleVisualSearchExecution(
     await sendWhatsAppMessage(toPhone, catalogIntro);
   }
 
-  // 3. Search directory in sheetsDb as well
+  // 3. Search the Firestore-backed directory as well.
   const searchResults = await sheetsDb.searchBusinessListings(queryText, targetLoc, category);
 
   const seenIds = new Set<string>();
@@ -8141,7 +8141,7 @@ async function sendMarketHubsMenu(toPhone: string) {
  * 5. VENDOR HUB & MERCHANT PORTAL (Self-Service Dashboard)
  */
 async function handleVendorHubRouting(toPhone: string, senderName: string) {
-  // Check if sender phone matches a registered vendor in Firestore or Sheets
+  // Check if sender phone matches a registered Firestore vendor.
   let existingMerchant = await firestoreDb.getMerchant(toPhone);
   const sheetListing = sheetsDb.getListingByPhone(toPhone);
 
@@ -8784,23 +8784,7 @@ export async function handleVendorAddProductWizard(params: {
 
       const savedProduct = await firestoreDb.saveProductListing(prodDoc as any);
 
-      // 2. Sync to Google Sheets
-      try {
-        await sheetsDb.addNewProductListing(
-          cleanPhone,
-          draft.productName || 'Product',
-          draft.discountPrice || draft.price || '0',
-          {
-            businessName: bizName,
-            businessWhatsapp: cleanPhone,
-            businessState: merchant?.state || 'Lagos',
-            businessCity: merchant?.city || 'Lagos',
-            businessCategory: merchant?.category || 'General',
-          }
-        );
-      } catch (sErr) {
-        console.warn('[AddProduct Wizard Sheets Sync Notice]:', sErr);
-      }
+      await sheetsDb.syncListingsFromFirestore(true);
 
       // Reset state
       updateWhatsAppSession(cleanPhone, { state: 'IDLE', vendorAddDraft: undefined });
@@ -9619,7 +9603,7 @@ async function checkAndNotifyReferralUnlock(toPhone: string, bizName: string) {
 }
 
 /**
- * Finalizes and saves a product listing to Firestore and Sheets, and sends confirmation with direct links.
+ * Finalizes and saves a product listing to Firestore, and sends confirmation with direct links.
  */
 async function finalizeAndPublishProduct(
   toPhone: string,
@@ -11730,8 +11714,8 @@ async function handleWhatsAppVerificationSteps(
         price: parsedProducts[0]?.price || 'Market Rate',
         listingType: 'Product',
       });
-    } catch (sheetErr) {
-      console.warn('[Sheets KYC Save Warning WA]:', sheetErr);
+    } catch (firestoreErr) {
+      console.warn('[Firestore KYC Save Warning WA]:', firestoreErr);
     }
 
     // Record Referral if merchant was invited via referral link
@@ -11935,7 +11919,7 @@ async function handleRegistrationSteps(
     ? parsed.parsedProducts.slice(0, 3)
     : [{ productName: prodDesc, price: priceRange }];
 
-  // Save the primary listing to Google Sheets
+  // Save the primary listing to Firestore.
   try {
     await sheetsDb.registerBusiness({
       userId: toPhone,
@@ -11964,7 +11948,7 @@ async function handleRegistrationSteps(
         category,
         price: extraProd.price,
         listingType: 'Product',
-      }).catch((e) => console.warn('[Reg Extra Product Sheets Warning]:', e?.message));
+      }).catch((e) => console.warn('[Reg Extra Product Firestore Warning]:', e?.message));
     }
   } catch (err) {
     console.warn('[Reg Sync Error]:', err);
@@ -12269,7 +12253,7 @@ async function handleClaimProcessSteps(toPhone: string, senderName: string, text
     // If sender's phone matches the listed phone -> Instant Auto-Claim!
     if (regPhone && (regPhone === senderClean || regPhone === `0${senderClean.slice(3)}`)) {
       if (draft.listingId) {
-        sheetsDb.updateListing(draft.listingId, {
+        await sheetsDb.updateListing(draft.listingId, {
           ownerFullName,
           isVerified: true,
           verifiedStatus: 'YES',
@@ -12352,7 +12336,7 @@ async function handleClaimProcessSteps(toPhone: string, senderName: string, text
 
     // Success -> Transfer listing ownership and save owner full name
     if (draft.listingId) {
-      const updated = sheetsDb.updateListing(draft.listingId, {
+      const updated = await sheetsDb.updateListing(draft.listingId, {
         whatsapp: toPhone,
         ownerFullName: draft.ownerFullName,
         isVerified: true,

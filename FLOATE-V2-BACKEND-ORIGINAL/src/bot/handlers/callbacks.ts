@@ -203,7 +203,7 @@ export function setupCallbackHandlers(bot: any) {
       // 1. Mark status as APPROVED in Firestore
       await firestoreDb.updatePendingReviewStatus(merchantId, 'APPROVED');
 
-      // 2. Add to active store directory (Google Sheets & Firestore)
+      // 2. Add to the active Firestore-backed store directory
       try {
         await sheetsDb.registerBusiness({
           userId: pending.userId || pending.whatsapp,
@@ -1098,9 +1098,9 @@ export function setupCallbackHandlers(bot: any) {
 
         let syncStatusNote = '';
         if (regResult.success) {
-          syncStatusNote = `\n\n📊 *Google Sheets Status:* Live Sync Active`;
+          syncStatusNote = `\n\n📊 *Firestore Status:* Saved and live`;
         } else {
-          syncStatusNote = `\n\n⚠️ *Google Sheets Sync Notice:* Saved to local memory and queued for Sheets sync.`;
+          syncStatusNote = `\n\n⚠️ *Firestore Notice:* ${regResult.error || 'Could not persist your listing.'}`;
         }
 
         const safeBizName = escapeMarkdownText(listing.businessName);
@@ -1205,9 +1205,9 @@ export function setupCallbackHandlers(bot: any) {
 
         let syncStatusNote = '';
         if (addResult.success) {
-          syncStatusNote = `\n\n📊 *Google Sheets Status:* Saved to Sheet (${sheetsDb.getSpreadsheetId()})`;
+          syncStatusNote = `\n\n📊 *Firestore Status:* Saved to Firestore`;
         } else {
-          syncStatusNote = `\n\n⚠️ *Google Sheets Sync Notice:* ${addResult.error || 'Saved to bot memory and queued for Sheets sync'}`;
+          syncStatusNote = `\n\n⚠️ *Firestore Notice:* ${addResult.error || 'Could not persist your product.'}`;
         }
 
         const safeProduct = escapeMarkdownText(listing.product);
@@ -1252,7 +1252,7 @@ export function setupCallbackHandlers(bot: any) {
 
     // Delete Business Confirmation Callbacks
     if (data === 'btn_del_biz_confirm') {
-      const deletedCount = sheetsDb.deleteBusinessByUserId(userId);
+      const deletedCount = await sheetsDb.deleteBusinessByUserId(userId);
       userStore.clearFlowState(userId);
       userStore.setRole(userId, 'BUYER', username);
 
@@ -1380,7 +1380,7 @@ export function setupCallbackHandlers(bot: any) {
       const id = data.replace('edit_confirm_del_', '');
       const listing = sheetsDb.getListingById(id);
       const name = listing?.product || 'Item';
-      sheetsDb.deleteListing(id);
+      await sheetsDb.deleteListing(id);
 
       userStore.clearFlowState(userId);
 

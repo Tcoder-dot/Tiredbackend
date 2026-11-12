@@ -81,13 +81,13 @@ export function ApiDocs() {
 
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-slate-400 font-medium">Google Sheets DB</span>
-            <Server className={`w-4 h-4 ${status?.spreadsheetId ? 'text-emerald-400' : 'text-sky-400'}`} />
+            <span className="text-xs text-slate-400 font-medium">FIRESTORE DATABASE</span>
+            <Server className="w-4 h-4 text-emerald-400" />
           </div>
           <p className="mt-2 text-sm font-semibold text-slate-100">
-            {status?.spreadsheetId ? '🟢 Linked Sheet' : '🟡 Ready'}
+            🟢 Primary data store
           </p>
-          <p className="text-[11px] text-slate-400 mt-1">Stores bot logs, leads, and vendors</p>
+          <p className="text-[11px] text-slate-400 mt-1">Merchants, products, and bot activity</p>
         </div>
       </div>
 
@@ -229,19 +229,7 @@ export function ApiDocs() {
           </p>
         </div>
 
-        {/* Endpoint 2 - Sheets DB Records */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-mono bg-indigo-950 text-indigo-300 border border-indigo-800 px-2 py-0.5 rounded font-bold">
-              GET /api/sheets/records
-            </span>
-          </div>
-          <p className="text-xs text-slate-300 leading-relaxed">
-            Retrieves recent rows and database records appended by the Telegram bot (/save, user messages, and command logs).
-          </p>
-        </div>
-
-        {/* Endpoint 3 */}
+        {/* Endpoint 2 */}
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono bg-slate-800 text-slate-300 border border-slate-700 px-2 py-0.5 rounded font-bold">

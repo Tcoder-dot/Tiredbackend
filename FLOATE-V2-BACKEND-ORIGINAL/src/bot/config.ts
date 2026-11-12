@@ -12,7 +12,6 @@ export const config = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN || '',
   webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || '',
   geminiApiKey: process.env.GEMINI_API_KEY || '',
-  spreadsheetId: process.env.SPREADSHEET_ID || '',
   adminTelegramId: process.env.ADMIN_TELEGRAM_ID || '',
   adminWhatsAppPhone: process.env.ADMIN_WHATSAPP_PHONE || '07065599116',
   appUrl: process.env.APP_URL || '',

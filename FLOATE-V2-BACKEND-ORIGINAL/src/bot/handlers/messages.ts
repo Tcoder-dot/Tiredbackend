@@ -783,9 +783,9 @@ async function handleActiveFlowStep(
 
         let syncStatusNote = '';
         if (regResult.success) {
-          syncStatusNote = `\n\n📊 *Google Sheets Status:* Live Sync Active`;
+          syncStatusNote = `\n\n📊 *Firestore Status:* Saved and live`;
         } else {
-          syncStatusNote = `\n\n⚠️ *Google Sheets Sync Notice:* Saved to local memory and queued for Sheets sync.`;
+          syncStatusNote = `\n\n⚠️ *Firestore Notice:* ${regResult.error || 'Could not persist your listing.'}`;
         }
 
         const safeBizName = escapeMarkdownText(listing.businessName);
@@ -1021,9 +1021,9 @@ async function handleActiveFlowStep(
 
           let syncStatusNote = '';
           if (addResult.success) {
-            syncStatusNote = `\n\n📊 *Google Sheets Status:* Saved to Sheet (${sheetsDb.getSpreadsheetId()})`;
+            syncStatusNote = `\n\n📊 *Firestore Status:* Saved to Firestore`;
           } else {
-            syncStatusNote = `\n\n⚠️ *Google Sheets Sync Notice:* ${addResult.error || 'Saved to bot memory and queued for Sheets sync'}`;
+            syncStatusNote = `\n\n⚠️ *Firestore Notice:* ${addResult.error || 'Could not persist your product.'}`;
           }
 
           await ctx.reply(
@@ -1183,7 +1183,7 @@ async function handleActiveFlowStep(
 
     const action = profile.selectedEditAction || 'NAME';
     if (action === 'NAME') {
-      sheetsDb.updateListing(profile.selectedListingId, { product: text });
+      await sheetsDb.updateListing(profile.selectedListingId, { product: text });
       userStore.clearFlowState(userId);
       await ctx.reply(`✅ *Product Name Updated!*\nNew name: *${text}*`, {
         parse_mode: 'Markdown',
@@ -1193,7 +1193,7 @@ async function handleActiveFlowStep(
     }
 
     if (action === 'PRICE') {
-      sheetsDb.updateListing(profile.selectedListingId, { price: text });
+      await sheetsDb.updateListing(profile.selectedListingId, { price: text });
       userStore.clearFlowState(userId);
       await ctx.reply(`✅ *Product Price Updated!*\nNew price: *${text}*`, {
         parse_mode: 'Markdown',
@@ -1205,7 +1205,7 @@ async function handleActiveFlowStep(
 
   // Update WhatsApp Flow
   if (step === 'AWAITING_UPDATE_WHATSAPP') {
-    sheetsDb.updateWhatsappForBusiness(userId, text);
+    await sheetsDb.updateWhatsappForBusiness(userId, text);
     userStore.clearFlowState(userId);
     userStore.updateRegistration(userId, { businessWhatsapp: text });
 
@@ -1225,7 +1225,7 @@ async function handleActiveFlowStep(
   if (step === 'AWAITING_DELETE_BUSINESS_CONFIRM') {
     const lower = text.trim().toLowerCase();
     if (lower === 'yes' || lower === 'confirm') {
-      const deletedCount = sheetsDb.deleteBusinessByUserId(userId);
+      const deletedCount = await sheetsDb.deleteBusinessByUserId(userId);
       userStore.clearFlowState(userId);
       userStore.setRole(userId, 'BUYER', username);
 
@@ -1303,7 +1303,7 @@ async function handleActiveFlowStep(
 
 /** Helper function to process business account claiming by phone number */
 async function processPhoneClaim(ctx: Context, userId: number, username: string, rawPhone: string) {
-  await sheetsDb.syncListingsFromSheets();
+  await sheetsDb.syncListingsFromFirestore();
   const targetPhoneNorm = normalizePhone(rawPhone);
 
   if (!targetPhoneNorm) {
@@ -1461,7 +1461,7 @@ async function handleBuyerSearch(ctx: Context, userId: number, username: string,
     const buyer = await firestoreDb.getOrCreateBuyerAccount(userId, 'telegram', username);
     const searchLocation = parsed.targetSellerLocation || buyer.primaryLocation || undefined;
 
-    // Execute structured search against live Google Sheets
+    // Execute structured search against the Firestore-backed listing cache
     let searchResults;
     try {
       searchResults = await sheetsDb.searchBusinessListings(

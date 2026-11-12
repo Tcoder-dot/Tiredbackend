@@ -3,7 +3,7 @@
  * 
  * Provides sub-15ms typo-tolerant search across verified merchants and products.
  * Seamlessly activates when MEILISEARCH_HOST (and optional MEILISEARCH_API_KEY / MEILISEARCH_MASTER_KEY)
- * are provided in environment variables, with automatic sync from sheets/Firestore listings.
+ * are provided in environment variables, with automatic sync from Firestore-backed listings.
  */
 
 import { Meilisearch, Index } from 'meilisearch';

@@ -1,5 +1,3 @@
-import { google } from 'googleapis';
-import { config } from '../config.js';
 import { firestoreDb } from './firestoreService.js';
 import { withExternalTimeout } from './timeoutService.js';
 import { meilisearchClient } from './meilisearchService.js';
@@ -494,20 +492,18 @@ export const DEFAULT_SEED_LISTINGS: BusinessListing[] = [
 ];
 
 class SheetsDatabaseService {
-  private activeSpreadsheetId: string = config.spreadsheetId || '1Z6Xi2vsjBgcRX_YqcN9epR-0ckSxLPqAomZqEpgDtVs';
-  
-  // Structured Business Listings - dynamically synced from Google Sheets with spotlight seeds
+  // Firestore-backed listing cache for synchronous legacy lookups.
   private businessListings: BusinessListing[] = [...DEFAULT_SEED_LISTINGS];
-  private lastSheetsSyncTime: number = 0;
+  private lastFirestoreSyncTime = 0;
 
-  // Local in-memory backup database for logs
+  // Short-lived cache for Firestore logs.
   private localDb: LocalSheetRow[] = [
     {
       timestamp: new Date().toISOString(),
       userId: 99912345,
       username: 'System',
       type: 'INIT',
-      content: 'Google Sheets Database initialized',
+      content: 'Firestore database initialized',
     },
   ];
 
@@ -519,213 +515,6 @@ class SheetsDatabaseService {
 
   // Store for pending business claim requests
   private pendingClaims: PendingClaim[] = [];
-
-  private createdSheetTabs = new Set<string>();
-
-  /**
-   * Helper to ensure a specific sheet tab exists in Google Sheets, and initializes headers if missing.
-   */
-  private async ensureTabExists(sheets: any, defaultTabName: string, headers: string[]): Promise<string> {
-    if (!this.activeSpreadsheetId) return defaultTabName;
-    const cacheKey = `${this.activeSpreadsheetId}:${defaultTabName}`;
-    if (this.createdSheetTabs.has(cacheKey)) {
-      return defaultTabName;
-    }
-
-    try {
-      const metadata = await sheets.spreadsheets.get({
-        spreadsheetId: this.activeSpreadsheetId,
-      });
-
-      const existingSheets = metadata.data.sheets || [];
-      const normalizedTarget = defaultTabName.toLowerCase().trim();
-
-      const foundSheet = existingSheets.find((s: any) => {
-        const title = (s.properties?.title || '').toLowerCase().trim();
-        if (title === normalizedTarget) return true;
-        if (normalizedTarget === 'buyer searches' && (title === 'search logs' || title === 'buyer search logs' || title === 'searches' || title === 'buyer searches')) return true;
-        if (normalizedTarget === 'floate business logs' && (title === 'merchants' || title === 'sellers' || title === 'business logs' || title === 'floate business logs')) return true;
-        return false;
-      });
-
-      if (foundSheet && foundSheet.properties?.title) {
-        const actualTitle = foundSheet.properties.title;
-        // Check if header row is present
-        const checkRange = await sheets.spreadsheets.values.get({
-          spreadsheetId: this.activeSpreadsheetId,
-          range: `'${actualTitle}'!A1:H1`,
-        });
-        if (!checkRange.data.values || checkRange.data.values.length === 0) {
-          await sheets.spreadsheets.values.update({
-            spreadsheetId: this.activeSpreadsheetId,
-            range: `'${actualTitle}'!A1`,
-            valueInputOption: 'USER_ENTERED',
-            requestBody: { values: [headers] },
-          });
-        }
-        this.createdSheetTabs.add(cacheKey);
-        return actualTitle;
-      }
-
-      // Tab does not exist, create it
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: this.activeSpreadsheetId,
-        requestBody: {
-          requests: [
-            {
-              addSheet: {
-                properties: {
-                  title: defaultTabName,
-                },
-              },
-            },
-          ],
-        },
-      });
-
-      // Write header row
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: this.activeSpreadsheetId,
-        range: `'${defaultTabName}'!A1`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [headers],
-        },
-      });
-
-      this.createdSheetTabs.add(cacheKey);
-      return defaultTabName;
-    } catch (err: any) {
-      console.warn(`[Sheets Tab Notice] Could not verify/create tab "${defaultTabName}":`, err?.message || err);
-      this.createdSheetTabs.add(cacheKey);
-      return defaultTabName;
-    }
-  }
-
-  public setSpreadsheetId(id: string) {
-    this.activeSpreadsheetId = id;
-  }
-
-  public getSpreadsheetId(): string {
-    return this.activeSpreadsheetId;
-  }
-
-  /**
-   * Helper method to initialize Google Sheets API client with flexible credentials fallback
-   */
-  private getSheetsClient() {
-    let auth: any;
-
-    const jsonCreds =
-      process.env.GOOGLE_CREDENTIALS_JSON ||
-      process.env.GOOGLE_SERVICE_ACCOUNT_JSON ||
-      process.env.GOOGLE_CREDENTIALS;
-
-    if (jsonCreds) {
-      try {
-        const raw = jsonCreds.trim();
-        const parsed = raw.startsWith('{')
-          ? JSON.parse(raw)
-          : JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
-        if (parsed && typeof parsed.private_key === 'string') {
-          parsed.private_key = parsed.private_key.replace(/\\n/g, '\n');
-        }
-        auth = new google.auth.GoogleAuth({
-          credentials: parsed,
-          scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-        });
-      } catch (e: any) {
-        console.warn('[Sheets Auth] Failed to parse JSON credentials from environment variable:', e?.message || e);
-      }
-    }
-
-    if (!auth) {
-      const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
-      const privateKey = process.env.GOOGLE_PRIVATE_KEY;
-      if (clientEmail && privateKey) {
-        auth = new google.auth.GoogleAuth({
-          credentials: {
-            client_email: clientEmail,
-            private_key: privateKey.replace(/\\n/g, '\n'),
-          },
-          scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-        });
-      }
-    }
-
-    if (!auth) {
-      // Fallback to configured service account credentials
-      auth = new google.auth.GoogleAuth({
-        credentials: {
-          client_email: "firebase-app-hosting-compute@studio-5970589505-27a98.iam.gserviceaccount.com",
-          private_key: "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC9lkwf6TvrD4rb\nEr7cighp4uPdxznh8YMy4HEDeosM4OdZFzsHXOr37XizGEU/QYuRI5ETdYEj1IvW\n5/7xSMH+oYatz3WNkI+xOTNwtUuPsVlqOCy15V9O51sCvJj3f2LVCyVB+qK/WLzg\nS4fM+vI1nDnEabzc8A+rhOSsD0bbe4ep2RNM0xbDa+I9IUuYkwPIU47A9b+94ULu\nUFPJLObVcHojV8eH4FDrQdNFhk9I4lUA/sTfztcxzFuc+WV99VJIQ7KyKXyKU7py\n5+EKuS0yFc4ee4/I7FgFZREntK3Vc8m/v4a8Q7VLuJABeaiRMbUpL0KjDr7CghuQ\nc4Wv7aTlAgMBAAECggEAJ/5Jpr2rzyVjNF2a96kCp1uemA1L75bkB1qDXKmAJcJX\n61pUMHRweMaWnKk1CmgISiDHnOQ/ztAqg7ZC+KFRkyZ947KM6MUjGs6nRFJqUzCl\nXRvmiqSNW3bAoy4n0qYDsk98l5OIu3a7uVEVn68cYyTGpuFrXuwhUhxhpM5AM1JZ\nuSmhvM4tiYlI3TuhnOCVn2mJkUu18UubtqLxduppl0Wnm5ntBztMGpNPpfJscsiT\nGE001EW2N4VEroqSyQ909vS/Gl6EvqsX54eGFDipOZezz3PZnhvscwg27dw9bUS2\nPtV/3Eo+NxQUrQHEL/BZZPw5rqhzDrxh02Mr92+uAQKBgQDnFweeiQU0u1IOSoS0\neIHqIKt9QUdWZGRRNedx+0e5KgNlQph/cpy3vDIgW/NeMyaGG3jhOvDkJuWrK+8X\nHz1KIE1/C4feZl/SMeaHuYdzhy15QQt56BvMROlNIaEfU/JgoxgZto2JElI9KmYf\n3ILQQ2pyflOeLOqIXyBIj/wfZQKBgQDSBf0MInvwJaObWYCh2xYu5OiLqOB6QXFL\n9/LQjINqtUXPEDvfPGKEDt7rpO3yRCMi5I311miwhkpmhkZVMOvhJrn221tTDMD0\ntFdB4Q8bv5ezQ0BnBW58sr/71UfOjCG9x+fVkv7q2kV/R52Tc4LkIdO5vWcVRFSf\n/ghZRzTXgQKBgG+8Kur0xZehmyNd1JyOSAK0mTaPAbc8A2Vg8u+h2CQntEyZzrKQ\n8EXGsVYEH8BEazQcxG3i2eb3B8WkEI7VhAT7aX0sTh2y0lIH3rdxdZTen5YpZSsk\nl4xFJaktwYIsTN18/oIwSm8kdK8ueQKe1IFul2GUw0mP3jbiB/IN7JIhAoGALBEz\nmjM2HBpZrMPn2I42plpDbOJfT2eh1RXObfG9tUsZvaujVGDALwNLxNfTUWz4jl60\nZqu5Rai3vbFY2pEsPQ66IFDAZbmcVvvr/xew6tqVgviOb89U8nczDy0eJvmCLubd\n/xMbx71Krb0iFAk9oo5ydVuHYI/4zaUorUrijIECgYBhr25WlNcJl2usZmazNSXX\nW+j5rkdQQQzf8o9mchdrRXEcQVhLLibB1PdbYRuD/0Oj6Gek7+c0HmM+qnFw3mgV\nV389mNA/nOOwQ4uvEHS0BPrx4mlWzy+n5ZI07Dx2i9U+IyIzw8l/o1ggJRA3/b1X\nZZLp1j1XNSbvsoPyciJjcA==\n-----END PRIVATE KEY-----\n",
-        },
-        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-      });
-    }
-
-    return google.sheets({ version: 'v4', auth });
-  }
-
-  /**
-   * Diagnostics method to test Google Sheets connection and credentials
-   */
-  public async testSheetsConnection(): Promise<{ success: boolean; spreadsheetId: string; serviceAccountEmail?: string; authMethod: string; error?: string }> {
-    const spreadsheetId = this.activeSpreadsheetId;
-    let authMethod = 'None';
-    let serviceAccountEmail: string | undefined = undefined;
-
-    const jsonCreds = process.env.GOOGLE_CREDENTIALS_JSON || process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS;
-    if (jsonCreds) {
-      authMethod = 'GOOGLE_CREDENTIALS_JSON';
-      try {
-        const raw = jsonCreds.trim();
-        const parsed = raw.startsWith('{') ? JSON.parse(raw) : JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
-        serviceAccountEmail = parsed.client_email;
-      } catch {}
-    } else if (process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL) {
-      authMethod = 'GOOGLE_SERVICE_ACCOUNT_EMAIL';
-      serviceAccountEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
-    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-      authMethod = 'GOOGLE_APPLICATION_CREDENTIALS';
-    } else {
-      authMethod = 'Configured Service Account Key';
-      serviceAccountEmail = 'firebase-app-hosting-compute@studio-5970589505-27a98.iam.gserviceaccount.com';
-    }
-
-    if (!spreadsheetId) {
-      return {
-        success: false,
-        spreadsheetId: 'Not Set',
-        serviceAccountEmail,
-        authMethod,
-        error: 'SPREADSHEET_ID environment variable is missing or empty.',
-      };
-    }
-
-    try {
-      const sheets = this.getSheetsClient();
-      await sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: 'Sheet1!A1:A2',
-      });
-      return {
-        success: true,
-        spreadsheetId,
-        serviceAccountEmail,
-        authMethod,
-      };
-    } catch (err: any) {
-      const errMsg = err?.response?.data?.error?.message || err?.message || String(err);
-      return {
-        success: false,
-        spreadsheetId,
-        serviceAccountEmail,
-        authMethod,
-        error: errMsg,
-      };
-    }
-  }
 
   /**
    * Registers or updates a business listing with state and city
@@ -746,7 +535,7 @@ class SheetsDatabaseService {
     verificationMediaUrl?: string;
     productImages?: string[];
     identityVerified?: boolean;
-  }): Promise<{ listing: BusinessListing; mode: 'sheets' | 'local'; success: boolean; error?: string }> {
+  }): Promise<{ listing: BusinessListing; mode: 'firestore' | 'local'; success: boolean; error?: string }> {
     const existing = this.businessListings.find((b) => b.userId === data.userId || b.businessName.toLowerCase() === data.businessName.toLowerCase());
     const regDate = new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
     const lType = data.listingType || 'Product';
@@ -755,25 +544,27 @@ class SheetsDatabaseService {
     const todayDate = new Date().toISOString().split('T')[0];
     let listing: BusinessListing;
     if (existing) {
-      existing.product = data.product;
-      existing.price = data.price;
-      existing.negotiation = isNeg;
-      existing.state = data.state;
-      existing.city = data.city;
-      existing.whatsapp = data.whatsapp;
-      existing.listingType = lType;
-      existing.category = data.category;
-      existing.productCount += 1;
-      existing.telegramId = data.userId;
-      existing.claimDate = todayDate;
-      existing.verifiedStatus = 'YES';
-      existing.isVerified = true;
-      if (data.ownerFullName) existing.ownerFullName = data.ownerFullName;
-      if (data.profileImageUrl) existing.profileImageUrl = data.profileImageUrl;
-      if (data.verificationMediaUrl) existing.verificationMediaUrl = data.verificationMediaUrl;
-      if (data.productImages && data.productImages.length > 0) existing.productImages = data.productImages;
-      if (data.identityVerified !== undefined) existing.identityVerified = data.identityVerified;
-      listing = existing;
+      listing = {
+        ...existing,
+        product: data.product,
+        price: data.price,
+        negotiation: isNeg,
+        state: data.state,
+        city: data.city,
+        whatsapp: data.whatsapp,
+        listingType: lType,
+        category: data.category,
+        productCount: existing.productCount + 1,
+        telegramId: data.userId,
+        claimDate: todayDate,
+        verifiedStatus: 'YES',
+        isVerified: true,
+        ...(data.ownerFullName ? { ownerFullName: data.ownerFullName } : {}),
+        ...(data.profileImageUrl ? { profileImageUrl: data.profileImageUrl } : {}),
+        ...(data.verificationMediaUrl ? { verificationMediaUrl: data.verificationMediaUrl } : {}),
+        ...(data.productImages?.length ? { productImages: data.productImages } : {}),
+        ...(data.identityVerified !== undefined ? { identityVerified: data.identityVerified } : {}),
+      };
     } else {
       listing = {
         id: `biz-${Date.now()}`,
@@ -799,11 +590,14 @@ class SheetsDatabaseService {
         productImages: data.productImages || [],
         identityVerified: data.identityVerified || false,
       };
-      this.businessListings.unshift(listing);
     }
 
-    // Sync to Firestore merchants collection as well
-    firestoreDb.syncMerchantsFromListings([listing]).catch(() => {});
+    await firestoreDb.syncMerchantsFromListings([listing]);
+    if (existing) {
+      Object.assign(existing, listing);
+    } else {
+      this.businessListings.unshift(listing);
+    }
 
     // Also log to localDb for search compatibility (owner's name is kept private)
     const formattedContent = `${listing.product} | Type: ${listing.listingType} | Price: ${listing.price} | Negotiable: ${listing.negotiation} | State: ${listing.state} | City: ${listing.city} | Seller: ${listing.businessName} | WhatsApp: ${listing.whatsapp} | Category: ${listing.category} | RegDate: ${listing.registeredSince} | Products: ${listing.productCount} | Telegram ID: ${listing.telegramId} | Verified: YES`;
@@ -815,47 +609,7 @@ class SheetsDatabaseService {
       content: formattedContent,
     });
 
-    // Try Google Sheets append (Columns A-M: Business name, whatsapp Number, Location, Type, Category, Product, Price, Negotiation, Spotlight, TELEGRAM ID, DATE, VERIFIED/CLAIMED, business full name)
-    if (this.activeSpreadsheetId) {
-      try {
-        const sheets = this.getSheetsClient();
-        const tabName = await this.ensureTabExists(sheets, 'Floate Business logs', [
-          'Business name', 'whatsapp Number', 'Location', 'Type', 'Category', 'Product', 'Price', 'Negotiation', 'Spotlight', 'TELEGRAM ID', 'DATE', 'VERIFIED/CLAIMED', 'business full name'
-        ]);
-
-        const locationStr = data.city && data.state ? `${data.city}, ${data.state}` : (data.city || data.state || 'Nigeria');
-
-        await sheets.spreadsheets.values.append({
-          spreadsheetId: this.activeSpreadsheetId,
-          range: `'${tabName}'!A:M`,
-          valueInputOption: 'USER_ENTERED',
-          requestBody: {
-            values: [[
-              data.businessName,
-              data.whatsapp,
-              locationStr,
-              listing.listingType,
-              data.category,
-              data.product,
-              data.price,
-              listing.negotiation,
-              listing.registeredSince,
-              String(data.userId), // Numeric Telegram ID Number
-              todayDate,
-              'YES',
-              data.ownerFullName || listing.ownerFullName || '' // Column M: business full name
-            ]],
-          },
-        });
-        return { listing, mode: 'sheets', success: true };
-      } catch (err: any) {
-        const errorMsg = err?.response?.data?.error?.message || err?.message || String(err);
-        console.error('[Google Sheets Registration Error]', errorMsg);
-        return { listing, mode: 'local', success: false, error: errorMsg };
-      }
-    }
-
-    return { listing, mode: 'local', success: false, error: 'SPREADSHEET_ID environment variable is missing.' };
+    return { listing, mode: 'firestore', success: true };
   }
 
   /**
@@ -934,9 +688,11 @@ class SheetsDatabaseService {
   /**
    * Updates a specific listing
    */
-  public updateListing(id: string, updates: Partial<BusinessListing>): BusinessListing | null {
+  public async updateListing(id: string, updates: Partial<BusinessListing>): Promise<BusinessListing | null> {
     const listing = this.businessListings.find((b) => b.id === id);
     if (!listing) return null;
+    const updated = await firestoreDb.updateListingRecord(id, updates);
+    if (!updated) return null;
     Object.assign(listing, updates);
     return listing;
   }
@@ -944,9 +700,10 @@ class SheetsDatabaseService {
   /**
    * Deletes a listing
    */
-  public deleteListing(id: string): boolean {
+  public async deleteListing(id: string): Promise<boolean> {
     const index = this.businessListings.findIndex((b) => b.id === id);
     if (index === -1) return false;
+    await firestoreDb.deleteProductById(id);
     const removed = this.businessListings.splice(index, 1)[0];
     const remaining = this.getBusinessListingsForUser(removed.userId);
     for (const b of remaining) {
@@ -958,11 +715,13 @@ class SheetsDatabaseService {
   /**
    * Deletes all listings belonging to a business matched by their Telegram user ID or query string (e.g. '2345')
    */
-  public deleteBusinessByUserId(userId: number | string): number {
+  public async deleteBusinessByUserId(userId: number | string): Promise<number> {
     const initialCount = this.businessListings.length;
+    const deleted = await firestoreDb.deleteMerchant(String(userId));
     this.businessListings = this.businessListings.filter((b) => String(b.userId) !== String(userId));
     const deletedCount = initialCount - this.businessListings.length;
-    this.logInteraction(userId, 'System', 'DELETE_BUSINESS', `Removed business and deleted ${deletedCount} listings`);
+    if (!deleted.deletedMerchant && deleted.deletedProductsCount === 0) return 0;
+    await this.logInteraction(userId, 'System', 'DELETE_BUSINESS', `Removed business and deleted ${deletedCount} listings`);
     return deletedCount;
   }
 
@@ -1025,12 +784,13 @@ class SheetsDatabaseService {
   /**
    * Updates WhatsApp number for all listings belonging to a business user
    */
-  public updateWhatsappForBusiness(userId: number | string, newWhatsapp: string): number {
+  public async updateWhatsappForBusiness(userId: number | string, newWhatsapp: string): Promise<number> {
     const listings = this.getBusinessListingsForUser(userId);
+    const updatedRecords = await firestoreDb.updateMerchantWhatsappForUser(userId, newWhatsapp);
     for (const b of listings) {
       b.whatsapp = newWhatsapp;
     }
-    return listings.length;
+    return updatedRecords;
   }
 
   /**
@@ -1049,7 +809,7 @@ class SheetsDatabaseService {
     phone?: string;
     pendingClaim?: PendingClaim;
   }> {
-    await this.syncListingsFromSheets();
+    await this.syncListingsFromFirestore();
 
     const targetPhoneNorm = normalizePhone(rawPhone);
     if (!targetPhoneNorm) {
@@ -1151,7 +911,7 @@ class SheetsDatabaseService {
   public async approveClaim(
     query: string
   ): Promise<{ success: boolean; pendingClaim?: PendingClaim; error?: string }> {
-    await this.syncListingsFromSheets();
+    await this.syncListingsFromFirestore();
 
     const q = query.trim().toLowerCase();
     const qPhoneNorm = normalizePhone(query);
@@ -1248,7 +1008,7 @@ class SheetsDatabaseService {
     claimedCount?: number;
     phone?: string;
   }> {
-    await this.syncListingsFromSheets();
+    await this.syncListingsFromFirestore();
 
     const targetPhoneNorm = normalizePhone(rawPhone);
     if (!targetPhoneNorm) {
@@ -1306,7 +1066,7 @@ class SheetsDatabaseService {
     customType?: string,
     customNegotiable?: 'Yes' | 'No',
     customProductImages?: string[]
-  ): Promise<{ listing: BusinessListing; mode: 'sheets' | 'local'; success: boolean; error?: string }> {
+  ): Promise<{ listing: BusinessListing; mode: 'firestore' | 'local'; success: boolean; error?: string }> {
     const existingListings = this.getBusinessListingsForUser(userId);
     const base = existingListings[0];
 
@@ -1341,205 +1101,124 @@ class SheetsDatabaseService {
       identityVerified: base?.identityVerified ?? fallbackProfile?.identityVerified,
     };
 
+    await this.logInteraction(userId, bizName, 'ADD_PRODUCT', `${productName} | Type: ${lType} | Price: ${price} | Negotiable: ${newListing.negotiation}`);
+
+    await firestoreDb.saveProductListing({
+      userId,
+      businessName: bizName,
+      whatsapp: wa,
+      state: st,
+      city: ct,
+      listingType: lType,
+      category: cat,
+      product: productName,
+      price,
+      negotiation: newListing.negotiation,
+      photoUrl: prodImages[0],
+    });
+
     for (const item of existingListings) {
       item.productCount = existingListings.length + 1;
     }
-
     this.businessListings.unshift(newListing);
-    await this.logInteraction(userId, bizName, 'ADD_PRODUCT', `${productName} | Type: ${lType} | Price: ${price} | Negotiable: ${newListing.negotiation}`);
 
-    if (this.activeSpreadsheetId) {
-      try {
-        const sheets = this.getSheetsClient();
-        const tabName = await this.ensureTabExists(sheets, 'Floate Business logs', [
-          'Business name', 'whatsapp Number', 'Location', 'Type', 'Category', 'Product', 'Price', 'Negotiation', 'Spotlight', 'TELEGRAM ID', 'DATE', 'VERIFIED/CLAIMED', 'business full name'
-        ]);
-
-        const locationStr = ct && st ? `${ct}, ${st}` : (ct || st || 'Nigeria');
-
-        await sheets.spreadsheets.values.append({
-          spreadsheetId: this.activeSpreadsheetId,
-          range: `'${tabName}'!A:M`,
-          valueInputOption: 'USER_ENTERED',
-          requestBody: {
-            values: [[
-              newListing.businessName,
-              newListing.whatsapp,
-              locationStr,
-              newListing.listingType,
-              newListing.category,
-              newListing.product,
-              newListing.price,
-              newListing.negotiation,
-              newListing.registeredSince,
-              String(userId), // Column J: TELEGRAM ID Number
-              new Date().toISOString().split('T')[0],
-              'YES',
-              newListing.ownerFullName || base?.ownerFullName || fallbackProfile?.ownerFullName || '' // Column M: business full name
-            ]],
-          },
-        });
-        return { listing: newListing, mode: 'sheets', success: true };
-      } catch (err: any) {
-        const errorMsg = err?.response?.data?.error?.message || err?.message || String(err);
-        console.error('[Google Sheets Add Product Error]', errorMsg);
-        return { listing: newListing, mode: 'local', success: false, error: errorMsg };
-      }
-    }
-
-    return { listing: newListing, mode: 'local', success: false, error: 'SPREADSHEET_ID environment variable is missing.' };
+    return { listing: newListing, mode: 'firestore', success: true };
   }
 
   /**
    * Adds an extra product for an existing business listing
    */
-  public async addProductForBusiness(userId: number | string, product: string, price: string, listingType?: string, negotiation?: 'Yes' | 'No'): Promise<{ listing: BusinessListing; mode: 'sheets' | 'local'; success: boolean; error?: string }> {
+  public async addProductForBusiness(userId: number | string, product: string, price: string, listingType?: string, negotiation?: 'Yes' | 'No'): Promise<{ listing: BusinessListing; mode: 'firestore' | 'local'; success: boolean; error?: string }> {
     return this.addNewProductListing(userId, product, price, undefined, listingType, negotiation);
   }
 
-  /**
-   * Syncs and loads live business listings directly from Google Sheets ('Floate Business logs' tab) with 8-10s timeout
-   */
-  public async syncListingsFromSheets(force: boolean = false): Promise<BusinessListing[]> {
+  public async syncListingsFromFirestore(force: boolean = false): Promise<BusinessListing[]> {
     return withExternalTimeout(
       async () => {
         const now = Date.now();
-        if (!force && this.lastSheetsSyncTime > 0 && (now - this.lastSheetsSyncTime < 30000) && this.businessListings.length > 0) {
+        if (!force && this.lastFirestoreSyncTime > 0 && (now - this.lastFirestoreSyncTime < 30000)) {
           return this.businessListings;
         }
 
-        if (!this.activeSpreadsheetId) {
-          return this.businessListings;
+        const [merchants, products] = await Promise.all([
+          firestoreDb.getAllMerchantsForAdmin(),
+          firestoreDb.getProductsFromFirestore(),
+        ]);
+        const merchantsByPhone = new Map<string, Awaited<ReturnType<typeof firestoreDb.getAllMerchantsForAdmin>>[number]>();
+        for (const merchant of merchants) {
+          const phone = normalizePhone(merchant.whatsapp);
+          if (phone) merchantsByPhone.set(phone, merchant);
+        }
+        const fetchedListings: BusinessListing[] = products.map((product) => {
+          const merchant = merchantsByPhone.get(normalizePhone(product.whatsapp));
+          const businessName = product.businessName || merchant?.businessName || '';
+          return {
+            id: product.id,
+            userId: product.userId ?? merchant?.userId ?? product.whatsapp,
+            telegramId: merchant?.telegramId,
+            businessName,
+            ownerFullName: merchant?.ownerFullName,
+            whatsapp: product.whatsapp || merchant?.whatsapp || '',
+            state: product.state || merchant?.state || '',
+            city: product.city || merchant?.city || '',
+            listingType: product.listingType || merchant?.listingType || 'Product',
+            category: product.category || merchant?.category || 'General',
+            product: product.product || merchant?.product || businessName,
+            price: product.price || 'Contact for price',
+            negotiation: product.negotiation === 'No' ? 'No' : 'Yes',
+            registeredSince: merchant?.registeredAt || merchant?.claimDate || '',
+            productCount: 1,
+            isVerified: product.isVerified ?? merchant?.isVerified ?? false,
+            verifiedStatus: merchant?.verifiedStatus === 'YES' || product.isVerified ? 'YES' : 'PENDING',
+            profileImageUrl: merchant?.profilePhotoUrl,
+            isHighlyRecommended: isSpotlightBusiness(businessName),
+          };
+        });
+
+        const productPhones = new Set(fetchedListings.map((listing) => normalizePhone(listing.whatsapp)));
+        for (const merchant of merchants) {
+          const phone = normalizePhone(merchant.whatsapp);
+          if (!merchant.product || (phone && productPhones.has(phone))) continue;
+          fetchedListings.push({
+            id: merchant.id,
+            userId: merchant.userId ?? merchant.id,
+            telegramId: merchant.telegramId,
+            businessName: merchant.businessName || '',
+            ownerFullName: merchant.ownerFullName,
+            whatsapp: merchant.whatsapp || '',
+            state: merchant.state || '',
+            city: merchant.city || '',
+            listingType: merchant.listingType || 'Product',
+            category: merchant.category || 'General',
+            product: merchant.product,
+            price: merchant.price || 'Contact for price',
+            negotiation: merchant.negotiation === 'No' ? 'No' : 'Yes',
+            registeredSince: merchant.registeredAt || merchant.claimDate || '',
+            productCount: merchant.productCount || 1,
+            isVerified: merchant.isVerified ?? false,
+            verifiedStatus: merchant.verifiedStatus === 'YES' || merchant.isVerified ? 'YES' : 'PENDING',
+            isHighlyRecommended: isSpotlightBusiness(merchant.businessName || ''),
+          });
         }
 
-        try {
-          const sheets = this.getSheetsClient();
-          const tabName = await this.ensureTabExists(sheets, 'Floate Business logs', [
-            'Business name', 'whatsapp Number', 'Location', 'Type', 'Category', 'Product', 'Price', 'Negotiation', 'Spotlight', 'TELEGRAM ID', 'DATE', 'VERIFIED/CLAIMED', 'business full name'
-          ]);
-
-          const res = await sheets.spreadsheets.values.get({
-            spreadsheetId: this.activeSpreadsheetId,
-            range: `'${tabName}'!A2:M1000`,
-          });
-
-          const values = res.data.values || [];
-          const fetchedListings: BusinessListing[] = [];
-
-          values.forEach((row: any[], index: number) => {
-            const bizName = (row[0] || '').trim();
-            const whatsapp = (row[1] || '').trim();
-            if (!bizName || !whatsapp) return;
-
-            const rawLoc = (row[2] || '').trim();
-            const listingType = (row[3] || 'Product').trim();
-            const category = (row[4] || 'General').trim();
-            const product = (row[5] || category || bizName).trim();
-            const price = (row[6] || 'Contact for price').trim();
-            const negotiationRaw = (row[7] || '').trim().toLowerCase();
-            const isNeg: 'Yes' | 'No' = (negotiationRaw === 'no' || negotiationRaw === 'n' || negotiationRaw === 'fixed') ? 'No' : 'Yes';
-            const regDate = (row[8] || 'Jul 2026').trim();
-            const telegramIdFromSheet = (row[9] || '').trim(); // Column J: TELEGRAM ID Number
-            const verifiedRaw = (row[11] || '').trim().toUpperCase(); // Column L: VERIFIED/CLAIMED
-            const ownerFullName = (row[12] || '').trim(); // Column M: business full name
-
-            let city = rawLoc;
-            let state = rawLoc;
-            if (rawLoc.includes(',')) {
-              const parts = rawLoc.split(',').map((p) => p.trim());
-              city = parts[0];
-              state = parts.slice(1).join(', ');
-            }
-
-            const isVer = verifiedRaw === 'YES' || verifiedRaw === 'TRUE';
-            const uId = telegramIdFromSheet || `sheet-${index + 1}`;
-
-            fetchedListings.push({
-              id: `sheet-${index + 1}`,
-              userId: uId,
-              telegramId: telegramIdFromSheet || undefined,
-              businessName: bizName,
-              ownerFullName: ownerFullName || undefined,
-              whatsapp,
-              state,
-              city,
-              listingType,
-              category,
-              product,
-              price,
-              negotiation: isNeg,
-              registeredSince: regDate,
-              productCount: 1,
-              isVerified: isVer || true,
-              verifiedStatus: isVer ? 'YES' : 'PENDING',
-              isHighlyRecommended: isSpotlightBusiness(bizName),
-            });
-          });
-
-          if (fetchedListings.length > 0) {
-            // Merge spotlight seed listings if not already in fetchedListings
-            for (const seed of DEFAULT_SEED_LISTINGS) {
-              const exists = fetchedListings.some(
-                (f) =>
-                  f.businessName.toLowerCase() === seed.businessName.toLowerCase() ||
-                  normalizePhone(f.whatsapp) === normalizePhone(seed.whatsapp)
-              );
-              if (!exists) {
-                fetchedListings.unshift(seed);
-                this.appendSeedToSheets(sheets, tabName, seed).catch(() => {});
-              }
-            }
-            this.businessListings = fetchedListings;
-            this.lastSheetsSyncTime = now;
-          }
-        } catch (err: any) {
-          console.warn('[Sheets Sync Notice] Could not sync live listings from Google Sheets:', err?.message || err);
+        if (merchants.length === 0 && products.length === 0) {
+          await firestoreDb.syncMerchantsFromListings(DEFAULT_SEED_LISTINGS);
+          fetchedListings.push(...DEFAULT_SEED_LISTINGS);
         }
 
-        // Always ensure Firestore & Meilisearch are synced with the latest business listings
-        firestoreDb.syncMerchantsFromListings(this.businessListings).catch(() => {});
-        meilisearchClient.syncListings(this.businessListings).catch(() => {});
-
+        this.businessListings = fetchedListings;
+        this.lastFirestoreSyncTime = now;
+        await meilisearchClient.syncListings(this.businessListings);
         return this.businessListings;
+
       },
       {
         timeoutMs: 8500,
-        serviceName: 'GoogleSheets',
-        operationName: 'syncListingsFromSheets',
+        serviceName: 'Firestore',
+        operationName: 'syncListingsFromFirestore',
         fallbackValue: this.businessListings,
       }
     );
-  }
-
-  private async appendSeedToSheets(sheets: any, tabName: string, listing: BusinessListing): Promise<void> {
-    if (!this.activeSpreadsheetId) return;
-    try {
-      const locationStr = listing.city && listing.state ? `${listing.city}, ${listing.state}` : (listing.city || listing.state || 'Nigeria');
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: this.activeSpreadsheetId,
-        range: `'${tabName}'!A:M`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [[
-            listing.businessName,
-            listing.whatsapp,
-            locationStr,
-            listing.listingType,
-            listing.category,
-            listing.product,
-            listing.price,
-            listing.negotiation,
-            listing.registeredSince,
-            String(listing.userId), // Column J: TELEGRAM ID Number
-            new Date().toISOString().split('T')[0],
-            'YES',
-            listing.ownerFullName || '' // Column M: business full name
-          ]],
-        },
-      });
-    } catch (e) {
-      console.warn('[SheetsSeedAppend Notice]', e);
-    }
   }
 
   /**
@@ -1556,10 +1235,9 @@ class SheetsDatabaseService {
     categoryMatches: BusinessListing[];
     allMatches: BusinessListing[];
     outOfAreaRecommendations?: BusinessListing[];
-    source: 'sheets' | 'local';
+    source: 'firestore';
   }> {
-    // Always sync live Google Sheet listings first
-    await this.syncListingsFromSheets();
+    await this.syncListingsFromFirestore();
 
     const q = (query || '').toLowerCase().trim();
     const cat = (categoryHint || '').toLowerCase().trim();
@@ -1574,7 +1252,7 @@ class SheetsDatabaseService {
         categoryMatches: [],
         allMatches: [],
         outOfAreaRecommendations: [],
-        source: this.activeSpreadsheetId ? 'sheets' : 'local',
+        source: 'firestore',
       };
     }
 
@@ -1938,7 +1616,7 @@ class SheetsDatabaseService {
       categoryMatches,
       allMatches: categoryMatches,
       outOfAreaRecommendations,
-      source: this.activeSpreadsheetId ? 'sheets' : 'local',
+      source: 'firestore',
     };
   }
 
@@ -2062,106 +1740,29 @@ class SheetsDatabaseService {
   }
 
   /**
-   * Appends a log or data record to Google Sheets database
+   * Appends a bot interaction record to Firestore.
    */
-  public async logInteraction(userId: number | string, username: string, type: string, content: string): Promise<{ success: boolean; mode: 'sheets' | 'local'; message: string }> {
+  public async logInteraction(userId: number | string, username: string, type: string, content: string): Promise<{ success: boolean; mode: 'firestore'; message: string }> {
     const timestamp = new Date().toISOString();
-
-    // Store in local memory store first
     const row: LocalSheetRow = { timestamp, userId, username, type, content };
+    await firestoreDb.logBotInteraction(row);
     this.localDb.unshift(row);
     if (this.localDb.length > 100) this.localDb.pop();
 
-    if (!this.activeSpreadsheetId) {
-      return {
-        success: true,
-        mode: 'local',
-        message: 'Saved to local in-memory store (Set SPREADSHEET_ID to sync with Google Sheets)',
-      };
-    }
-
-    if (type.startsWith('BUYER_SEARCH_')) {
-      // Buyer searches are logged in dedicated 'Buyer Searches' tab via logSearch
-      return { success: true, mode: 'sheets', message: 'Logged in Buyer Searches tab' };
-    }
-
-    try {
-      // If SPREADSHEET_ID is set, attempt Google Sheets API append call
-      const sheets = this.getSheetsClient();
-      const tabName = await this.ensureTabExists(sheets, 'Sheet1', [
-        'Timestamp', 'User ID', 'Username', 'Type', 'Content'
-      ]);
-
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: this.activeSpreadsheetId,
-        range: `'${tabName}'!A:E`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [[timestamp, userId, username, type, content]],
-        },
-      });
-
-      return {
-        success: true,
-        mode: 'sheets',
-        message: `Successfully appended row to Google Sheet (${this.activeSpreadsheetId})`,
-      };
-    } catch (err: any) {
-      console.warn('Google Sheets API append call notice:', err?.message || err);
-      return {
-        success: true,
-        mode: 'local',
-        message: `Stored locally (${err?.message || 'Sheets credentials required'})`,
-      };
-    }
+    return { success: true, mode: 'firestore', message: 'Saved to Firestore.' };
   }
 
   /**
-   * Searches database (Google Sheet or local store) for rows matching query string
+   * Searches Firestore bot interaction logs for rows matching a query string.
    */
-  public async searchDatabase(query: string): Promise<{ matches: LocalSheetRow[]; totalSearched: number; source: 'sheets' | 'local' }> {
+  public async searchDatabase(query: string): Promise<{ matches: LocalSheetRow[]; totalSearched: number; source: 'firestore' }> {
     const cleanQuery = query.toLowerCase().trim();
     if (!cleanQuery) {
-      return { matches: [], totalSearched: 0, source: 'local' };
+      return { matches: [], totalSearched: 0, source: 'firestore' };
     }
 
-    if (this.activeSpreadsheetId) {
-      try {
-        const sheets = this.getSheetsClient();
-
-        const res = await sheets.spreadsheets.values.get({
-          spreadsheetId: this.activeSpreadsheetId,
-          range: 'Sheet1!A1:Z500',
-        });
-
-        const values = res.data.values || [];
-        const matches: LocalSheetRow[] = [];
-
-        for (const row of values) {
-          const rowString = row.join(' ').toLowerCase();
-          if (rowString.includes(cleanQuery)) {
-            matches.push({
-              timestamp: row[0] || '',
-              userId: row[1] || '',
-              username: row[2] || '',
-              type: row[3] || '',
-              content: row[4] || row.slice(4).join(' ') || '',
-            });
-          }
-        }
-
-        return {
-          matches,
-          totalSearched: values.length,
-          source: 'sheets',
-        };
-      } catch (err: any) {
-        console.warn('Sheets search notice, falling back to local DB search:', err?.message || 'Sheets API disabled or credentials missing');
-      }
-    }
-
-    // Local DB search fallback
-    const matches = this.localDb.filter((row) =>
+    const rows = await firestoreDb.getBotInteractions();
+    const matches = rows.filter((row) =>
       row.content.toLowerCase().includes(cleanQuery) ||
       row.username.toLowerCase().includes(cleanQuery) ||
       row.type.toLowerCase().includes(cleanQuery)
@@ -2169,48 +1770,21 @@ class SheetsDatabaseService {
 
     return {
       matches,
-      totalSearched: this.localDb.length,
-      source: 'local',
+      totalSearched: rows.length,
+      source: 'firestore',
     };
   }
 
   /**
-   * Retrieves stored records from Google Sheets or local DB
+   * Retrieves recent bot interaction records from Firestore.
    */
-  public async getRecentLogs(): Promise<{ rows: LocalSheetRow[]; spreadsheetId: string }> {
-    if (this.activeSpreadsheetId) {
-      try {
-        const sheets = this.getSheetsClient();
-
-        const res = await sheets.spreadsheets.values.get({
-          spreadsheetId: this.activeSpreadsheetId,
-          range: 'Sheet1!A1:E20',
-        });
-
-        const values = res.data.values;
-        if (values && values.length > 0) {
-          const fetchedRows: LocalSheetRow[] = values.map((v) => ({
-            timestamp: v[0] || '',
-            userId: v[1] || '',
-            username: v[2] || '',
-            type: v[3] || '',
-            content: v[4] || '',
-          }));
-          return { rows: fetchedRows, spreadsheetId: this.activeSpreadsheetId };
-        }
-      } catch (err) {
-        console.warn('Unable to fetch live Google Sheets rows, serving local DB fallback');
-      }
-    }
-
-    return {
-      rows: this.localDb,
-      spreadsheetId: this.activeSpreadsheetId,
-    };
+  public async getRecentLogs(): Promise<{ rows: LocalSheetRow[] }> {
+    const rows = await firestoreDb.getBotInteractions();
+    return { rows: rows.slice(0, 20) };
   }
 
   /**
-   * Logs buyer search queries to the SearchLogs sheet tab automatically
+   * Logs buyer search queries to Firestore automatically.
    * Columns: Timestamp, Buyer Telegram ID, Buyer Name, Searched Product, Searched Price, Searched Location, Match Found (Yes/No), Number of Matches
    */
   public async logSearch(
@@ -2240,8 +1814,7 @@ class SheetsDatabaseService {
     this.searchLogs.unshift(row);
     if (this.searchLogs.length > 200) this.searchLogs.pop();
 
-    // Track log in Firestore search_logs collection
-    firestoreDb.logSearch({
+    await firestoreDb.logSearch({
       buyerTelegramId: row.buyerTelegramId,
       buyerName: row.buyerName,
       searchedProduct: row.searchedProduct,
@@ -2253,43 +1826,7 @@ class SheetsDatabaseService {
       matchedProductIds,
       channel,
       timestamp: row.timestamp,
-    }).catch((err) => console.warn('[SheetsService] Firestore logSearch notice:', err));
-
-    if (!this.activeSpreadsheetId) return;
-
-    try {
-      const sheets = this.getSheetsClient();
-      const tabName = await this.ensureTabExists(sheets, 'Buyer Searches', [
-        'Timestamp',
-        'Buyer Telegram ID',
-        'Buyer Name',
-        'Searched Product',
-        'Price Filter',
-        'Location Filter',
-        'Match Found',
-        'Number of Matches'
-      ]);
-
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: this.activeSpreadsheetId,
-        range: `'${tabName}'!A:H`,
-        valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [[
-            timestamp,
-            String(row.buyerTelegramId),
-            row.buyerName,
-            row.searchedProduct,
-            row.searchedPrice,
-            row.searchedLocation,
-            row.matchFound,
-            row.numberOfMatches,
-          ]],
-        },
-      });
-    } catch (err: any) {
-      console.warn('Buyer Searches Google Sheets append notice:', err?.message || err);
-    }
+    });
   }
 
   /**
