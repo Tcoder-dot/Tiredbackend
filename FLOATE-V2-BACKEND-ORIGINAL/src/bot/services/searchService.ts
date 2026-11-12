@@ -1,6 +1,5 @@
 import { parseShoppingQuery, ParsedCommerceQuery } from './aiService.js';
 import { sheetsDb, BusinessListing, isSpotlightBusiness } from './sheetsService.js';
-import { meilisearchClient } from './meilisearchService.js';
 import { redisClient } from './redisService.js';
 import { getPublicSiteUrl, buildMerchantProfileUrl } from '../../config/siteUrls.js';
 
@@ -213,39 +212,21 @@ export async function executeSearch(input: SearchInput): Promise<SearchExecution
   // Apply explicit overrides from input if provided
   if (input.location) parsed.targetSellerLocation = input.location;
 
-  // 2. Ultra-Fast Search Lookup (Meilisearch + Sheets fallback)
+  // 2. Search the Firestore-backed catalog shared with frontend search.
   const searchKeywords = parsed.searchKeywords || rawQuery;
   let searchResults;
 
-  // Check Meilisearch cluster if available
-  let meiliHits: BusinessListing[] | null = null;
-  if (meilisearchClient.isAvailable()) {
-    meiliHits = await meilisearchClient.search(searchKeywords, {
-      location: parsed.targetSellerLocation || undefined,
-      category: parsed.category || undefined,
-    });
-  }
-
-  if (meiliHits && meiliHits.length > 0) {
-    searchResults = {
-      exactMatches: meiliHits.slice(0, 5),
-      categoryMatches: meiliHits.slice(5),
-      allMatches: meiliHits,
-      source: 'local' as const,
-    };
-  } else {
-    try {
-      searchResults = await sheetsDb.searchBusinessListings(
-        searchKeywords,
-        parsed.targetSellerLocation,
-        parsed.category,
-        parsed.maxPriceNaira,
-        parsed.inferredCategories
-      );
-    } catch (searchErr: any) {
-      console.error('[SearchService] Search execution error:', searchErr?.message || searchErr);
-      searchResults = { exactMatches: [], categoryMatches: [], allMatches: [], source: 'local' as const };
-    }
+  try {
+    searchResults = await sheetsDb.searchBusinessListings(
+      searchKeywords,
+      parsed.targetSellerLocation,
+      parsed.category,
+      parsed.maxPriceNaira,
+      parsed.inferredCategories
+    );
+  } catch (searchErr: any) {
+    console.error('[SearchService] Search execution error:', searchErr?.message || searchErr);
+    searchResults = { exactMatches: [], categoryMatches: [], allMatches: [], source: 'local' as const };
   }
 
   // 3. Transform into clean standardized results

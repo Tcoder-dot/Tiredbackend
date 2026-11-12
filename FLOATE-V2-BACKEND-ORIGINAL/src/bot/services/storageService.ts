@@ -38,7 +38,7 @@ export async function uploadTelegramMediaToStorage(
   destinationPath: string,
   mimeType: string = 'image/jpeg'
 ): Promise<string> {
-  const isProductImage = destinationPath.startsWith('products/') && mimeType.startsWith('image/');
+  const isImage = mimeType.startsWith('image/');
   try {
     const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
     const response = await fetch(fileUrl);
@@ -49,10 +49,11 @@ export async function uploadTelegramMediaToStorage(
     const arrayBuffer = await response.arrayBuffer();
     const buffer = new Uint8Array(arrayBuffer);
 
-    if (isProductImage) {
+    if (isImage) {
       const fileName = path.basename(destinationPath).replace(/\.[^.]+$/, '');
+      const requestedFolder = path.posix.dirname(destinationPath).replace(/^\/+|\/+$/g, '');
       return await uploadImageToCloudinary(buffer, {
-        folder: 'floate/products',
+        folder: requestedFolder.startsWith('floate/') ? requestedFolder : `floate/${requestedFolder || 'images'}`,
         publicId: fileName,
         mimeType,
       });
@@ -69,9 +70,8 @@ export async function uploadTelegramMediaToStorage(
     const downloadUrl = await getDownloadURL(storageRef);
     return downloadUrl;
   } catch (err: any) {
-    if (isProductImage) throw err;
+    if (isImage) throw err;
     console.warn(`[Firebase Storage Upload Notice] Storage upload fallback for ${destinationPath}:`, err?.message || err);
-    // Fallback: return a data or telegram file path reference if storage bucket is in cold-start
     return `https://api.telegram.org/file/bot${botToken}/${filePath}`;
   }
 }
@@ -81,15 +81,10 @@ export async function uploadBufferToCloudinary(
   destinationPath: string,
   mimeType: string = 'image/jpeg'
 ): Promise<string> {
-  try {
-    const fileName = path.basename(destinationPath).replace(/\.[^.]+$/, '');
-    return await uploadImageToCloudinary(buffer, {
-      folder: path.posix.dirname(destinationPath).replace(/^\/+|\/+$/g, '') || 'floate',
-      publicId: fileName,
-      mimeType,
-    });
-  } catch (err: any) {
-    console.warn(`[Cloudinary Buffer Upload Notice]`, err?.message || err);
-    return '';
-  }
+  const fileName = path.basename(destinationPath).replace(/\.[^.]+$/, '');
+  return uploadImageToCloudinary(buffer, {
+    folder: path.posix.dirname(destinationPath).replace(/^\/+|\/+$/g, '') || 'floate',
+    publicId: fileName,
+    mimeType,
+  });
 }

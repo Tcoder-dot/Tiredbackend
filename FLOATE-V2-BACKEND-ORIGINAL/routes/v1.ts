@@ -3,6 +3,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import type { DocumentSnapshot } from "firebase-admin/firestore";
 import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { adminFirestoreDb } from "../services/adminFirestore";
+import { publishApprovedBusiness, removeBusinessFromPublicCatalog } from "../services/publicCatalogService";
 import { createMerchantSlug } from "../src/utils/merchantSlug";
 import { normalizeWhatsAppNumber } from "../src/utils/whatsapp";
 import { isWhatsAppAuthConfigured, isWhatsAppConfigured } from "../src/bot/config.js";
@@ -516,45 +517,66 @@ const SEED_MERCHANTS = [
   }
 ];
 
-// Helper: Query all verified merchants (Firestore with SEED fallback)
+// Read only approved records from the shared website/WhatsApp catalog.
 async function getAllMerchants(): Promise<any[]> {
   try {
-    const snap = await adminFirestoreDb.collection("businesses").get();
-    if (!snap.empty) {
-      const list: any[] = [];
-      snap.forEach((docSnap) => {
-        const d = docSnap.data();
-        const bizName = d.businessName || d.name || "Verified Merchant";
-        const slug = d.slug || docSnap.id;
-        const city = d.city || "Lagos";
-        const status = String(d.verificationStatus || d.verification_status || "").toUpperCase();
-        const verified = ["APPROVED", "VERIFIED"].includes(status) ||
-          (!status && (d.verified === true || d.isVerified === true));
-        list.push({
-          id: docSnap.id,
-          slug,
-          name: bizName,
-          city,
-          state: d.state || "Nigeria",
-          category: d.primaryCategory || d.category || "General Merchandise",
-          verified,
-          verificationStatus: status || (verified ? "APPROVED" : "PENDING_REVIEW"),
-          is_spotlight: Boolean(d.is_spotlight || d.isSpotlight),
-          avatar_url: d.publicAvatarUrl || "",
-          bio: d.bio || d.description || "",
-          whatsapp_number: d.whatsappNumber || d.whatsapp || d.phone || d.whatsapp_number || "",
-          rating: Number(d.rating) || 0,
-          completed_escrows: Number(d.completedEscrows || d.completed_escrows) || 0,
-          statuses: Array.isArray(d.statuses) ? d.statuses : [],
-          products: Array.isArray(d.products) ? d.products : []
+    const snapshot = await adminFirestoreDb.collection("public_catalog")
+      .where("isPublished", "==", true)
+      .get();
+    const merchants = new Map<string, any>();
+    snapshot.forEach((document) => {
+      const record = document.data();
+      if (
+        record.isVerified !== true ||
+        String(record.verificationStatus || "").toUpperCase() !== "APPROVED"
+      ) return;
+
+      const id = String(record.businessId || document.id);
+      const name = String(record.businessName || record.name || "").trim();
+      if (!name) return;
+      let merchant = merchants.get(id);
+      if (!merchant) {
+        merchant = {
+          id,
+          slug: String(record.slug || id),
+          name,
+          city: String(record.city || ""),
+          state: String(record.state || ""),
+          marketLocation: String(record.marketLocation || record.location || ""),
+          category: String(record.category || "General Merchandise"),
+          verified: true,
+          verificationStatus: "APPROVED",
+          is_spotlight: Boolean(record.is_spotlight || record.isSpotlight),
+          avatar_url: String(record.profileImageUrl || ""),
+          bio: String(record.description || ""),
+          whatsapp_number: String(record.whatsapp || record.whatsappNumber || ""),
+          rating: Number(record.rating) || 0,
+          completed_escrows: Number(record.completedEscrows || record.completed_escrows) || 0,
+          statuses: [],
+          products: []
+        };
+        merchants.set(id, merchant);
+      }
+
+      const title = String(record.product || "").trim();
+      if (title) {
+        merchant.products.push({
+          id: String(record.productId || document.id),
+          title,
+          price_naira: Number(record.numericPrice) || 0,
+          formatted_price: String(record.price || ""),
+          photo_url: String(record.imageUrl || ""),
+          description: String(record.description || ""),
+          in_stock: record.inStock !== false,
+          category: String(record.category || merchant.category)
         });
-      });
-      return list;
-    }
+      }
+    });
+    return Array.from(merchants.values());
   } catch (err: any) {
-    console.warn("[v1 API] Firestore merchants query error:", err.message);
+    console.error("[v1 API] Published catalog query failed:", err);
+    return [];
   }
-  return [];
 }
 
 // Helper: Flatten all products with vendor metadata
@@ -597,10 +619,16 @@ export async function getAllProducts(): Promise<any[]> {
   }
 
   try {
-    const productSnapshot = await adminFirestoreDb.collection("products").get();
+    const productSnapshot = await adminFirestoreDb.collection("public_catalog")
+      .where("isPublished", "==", true)
+      .get();
     productSnapshot.forEach((productDoc) => {
       const product = productDoc.data();
-      const id = String(product.id || productDoc.id);
+      if (
+        product.isVerified !== true ||
+        String(product.verificationStatus || "").toUpperCase() !== "APPROVED"
+      ) return;
+      const id = String(product.productId || product.id || productDoc.id);
       if (productIds.has(id)) return;
 
       const title = String(product.title || product.name || product.product || "").trim();
@@ -1934,6 +1962,7 @@ router.post("/api/v1/admin/verifications/:vendorId/approve", requireAdminApiKey,
       reviewer_name: reviewerName
     }, { merge: true });
     await batch.commit();
+    await publishApprovedBusiness(businessId);
 
     const notification = await sendVerificationWhatsApp(
       String(business.whatsappNumber || business.whatsapp || business.phone || application.whatsapp || ""),
@@ -2006,6 +2035,7 @@ router.post("/api/v1/admin/verifications/:vendorId/reject", requireAdminApiKey, 
       reviewer_name: reviewerName
     }, { merge: true });
     await batch.commit();
+    await removeBusinessFromPublicCatalog(businessId);
 
     const notification = await sendVerificationWhatsApp(
       String(business.whatsappNumber || business.whatsapp || business.phone || application.whatsapp || ""),
@@ -2192,6 +2222,21 @@ export async function consumeRegistrationVerificationToken(phone: string, token:
     (value) => value.expiresAt > Date.now() && value.phone === phone
   );
   return record !== null;
+}
+
+export async function verifyRegistrationVerificationToken(phone: string, token: string): Promise<boolean> {
+  if (!token || token.length > 128) return false;
+  const canonicalPhone = normalizeWhatsAppNumber(phone);
+  if (!canonicalPhone) return false;
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const record = await redisService.get<{ phone: string; expiresAt: number }>(
+    `registration_phone_verification:${tokenHash}`
+  );
+  return Boolean(
+    record &&
+    record.expiresAt > Date.now() &&
+    normalizeWhatsAppNumber(record.phone) === canonicalPhone
+  );
 }
 
 router.post(["/api/v1/auth/whatsapp/request-code", "/api/auth/whatsapp/request-code"], async (req: Request, res: Response) => {

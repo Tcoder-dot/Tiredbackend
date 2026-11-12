@@ -1,6 +1,7 @@
 import { firestoreDb } from './firestoreService.js';
 import { withExternalTimeout } from './timeoutService.js';
-import { meilisearchClient } from './meilisearchService.js';
+import { adminFirestoreDb } from '../../../services/adminFirestore.js';
+import { publishWhatsAppListing } from '../../../services/publicCatalogService.js';
 
 export interface LocalSheetRow {
   timestamp: string;
@@ -385,115 +386,9 @@ export function formatListingDisplay(
   return text;
 }
 
-export const DEFAULT_SEED_LISTINGS: BusinessListing[] = [
-  {
-    id: 'seed-makkys-luxe',
-    userId: 'seed-makkys-luxe',
-    businessName: "MAKKY'S LUXE",
-    whatsapp: '07049113767',
-    state: 'Anambra',
-    city: 'Main Market, Onitsha',
-    listingType: 'Product',
-    category: 'Jewelries, Perfumes, Decorations & Packages',
-    product: 'Jewelries, Perfumes, Home & Event Decorations, Gift Packages',
-    price: 'Contact for Best Price',
-    negotiation: 'Yes',
-    registeredSince: 'Aug 2026',
-    productCount: 1,
-    isVerified: true,
-    isHighlyRecommended: true,
-  },
-  {
-    id: 'seed-chivora',
-    userId: 'seed-chivora',
-    businessName: 'CHIVORA',
-    whatsapp: '08139598835',
-    state: 'Enugu',
-    city: 'Enugu',
-    listingType: 'Product',
-    category: 'Footwear & Shoes',
-    product: 'Quality Leather Shoes, Slides & Slippers',
-    price: '₦15,000',
-    negotiation: 'Yes',
-    registeredSince: 'Jul 2026',
-    productCount: 1,
-    isVerified: true,
-    isHighlyRecommended: true,
-  },
-  {
-    id: 'seed-goodys',
-    userId: 'seed-goodys',
-    businessName: "GOODY'S COLLECTION",
-    whatsapp: '08064292345',
-    state: 'Anambra',
-    city: 'Main Market, Onitsha',
-    listingType: 'Product',
-    category: 'Footwear & Slippers',
-    product: 'Unisex Slippers, Leather Sandals & Slides',
-    price: '₦12,000',
-    negotiation: 'Yes',
-    registeredSince: 'Jul 2026',
-    productCount: 1,
-    isVerified: true,
-    isHighlyRecommended: true,
-  },
-  {
-    id: 'seed-mbams',
-    userId: 'seed-mbams',
-    businessName: 'MBAMS PHONES & GADGETS',
-    whatsapp: '08101234567',
-    state: 'Enugu',
-    city: 'Enugu',
-    listingType: 'Product',
-    category: 'Phones & Gadgets',
-    product: 'Smartphones, iPhones, UK Used Devices & Accessories',
-    price: 'Contact for Best Price',
-    negotiation: 'Yes',
-    registeredSince: 'Jul 2026',
-    productCount: 1,
-    isVerified: true,
-    isHighlyRecommended: true,
-  },
-  {
-    id: 'seed-jules',
-    userId: 'seed-jules',
-    businessName: 'JULES BOUTIQUE & APPAREL',
-    whatsapp: '08109876543',
-    state: 'Lagos',
-    city: 'Balogun Market, Lagos Island',
-    listingType: 'Product',
-    category: 'Boutique & Fashion Wears',
-    product: 'Designer Handbags, Corporate & Casual Outfits, Dresses',
-    price: 'Contact for Best Price',
-    negotiation: 'Yes',
-    registeredSince: 'Jul 2026',
-    productCount: 1,
-    isVerified: true,
-    isHighlyRecommended: true,
-  },
-  {
-    id: 'seed-rich-build',
-    userId: 'seed-rich-build',
-    businessName: 'Rich Build',
-    ownerFullName: 'Rich Chukwuemeka',
-    whatsapp: '07065599116',
-    state: 'Enugu',
-    city: 'Enugu',
-    listingType: 'Service',
-    category: 'Website Development & Tech Solutions',
-    product: 'Website Development, Custom Software, Tech Solutions & Mobile Apps',
-    price: 'Contact for Best Price',
-    negotiation: 'Yes',
-    registeredSince: 'Aug 2026',
-    productCount: 1,
-    isVerified: true,
-    isHighlyRecommended: true,
-  },
-];
-
 class SheetsDatabaseService {
   // Firestore-backed listing cache for synchronous legacy lookups.
-  private businessListings: BusinessListing[] = [...DEFAULT_SEED_LISTINGS];
+  private businessListings: BusinessListing[] = [];
   private lastFirestoreSyncTime = 0;
 
   // Short-lived cache for Firestore logs.
@@ -1136,79 +1031,48 @@ class SheetsDatabaseService {
     return withExternalTimeout(
       async () => {
         const now = Date.now();
-        if (!force && this.lastFirestoreSyncTime > 0 && (now - this.lastFirestoreSyncTime < 30000)) {
+        if (!force && this.lastFirestoreSyncTime > 0 && (now - this.lastFirestoreSyncTime < 5000)) {
           return this.businessListings;
         }
 
-        const [merchants, products] = await Promise.all([
-          firestoreDb.getAllMerchantsForAdmin(),
-          firestoreDb.getProductsFromFirestore(),
-        ]);
-        const merchantsByPhone = new Map<string, Awaited<ReturnType<typeof firestoreDb.getAllMerchantsForAdmin>>[number]>();
-        for (const merchant of merchants) {
-          const phone = normalizePhone(merchant.whatsapp);
-          if (phone) merchantsByPhone.set(phone, merchant);
-        }
-        const fetchedListings: BusinessListing[] = products.map((product) => {
-          const merchant = merchantsByPhone.get(normalizePhone(product.whatsapp));
-          const businessName = product.businessName || merchant?.businessName || '';
-          return {
-            id: product.id,
-            userId: product.userId ?? merchant?.userId ?? product.whatsapp,
-            telegramId: merchant?.telegramId,
-            businessName,
-            ownerFullName: merchant?.ownerFullName,
-            whatsapp: product.whatsapp || merchant?.whatsapp || '',
-            state: product.state || merchant?.state || '',
-            city: product.city || merchant?.city || '',
-            listingType: product.listingType || merchant?.listingType || 'Product',
-            category: product.category || merchant?.category || 'General',
-            product: product.product || merchant?.product || businessName,
-            price: product.price || 'Contact for price',
-            negotiation: product.negotiation === 'No' ? 'No' : 'Yes',
-            registeredSince: merchant?.registeredAt || merchant?.claimDate || '',
-            productCount: 1,
-            isVerified: product.isVerified ?? merchant?.isVerified ?? false,
-            verifiedStatus: merchant?.verifiedStatus === 'YES' || product.isVerified ? 'YES' : 'PENDING',
-            profileImageUrl: merchant?.profilePhotoUrl,
-            isHighlyRecommended: isSpotlightBusiness(businessName),
-          };
-        });
+        this.businessListings = [];
+        const snapshot = await adminFirestoreDb.collection('public_catalog').get();
+        const fetchedListings: BusinessListing[] = snapshot.docs
+          .map((document) => {
+            const record = document.data();
+            if (
+              record.isPublished !== true ||
+              record.isVerified !== true ||
+              String(record.verificationStatus || '').toUpperCase() !== 'APPROVED'
+            ) return null;
 
-        const productPhones = new Set(fetchedListings.map((listing) => normalizePhone(listing.whatsapp)));
-        for (const merchant of merchants) {
-          const phone = normalizePhone(merchant.whatsapp);
-          if (!merchant.product || (phone && productPhones.has(phone))) continue;
-          fetchedListings.push({
-            id: merchant.id,
-            userId: merchant.userId ?? merchant.id,
-            telegramId: merchant.telegramId,
-            businessName: merchant.businessName || '',
-            ownerFullName: merchant.ownerFullName,
-            whatsapp: merchant.whatsapp || '',
-            state: merchant.state || '',
-            city: merchant.city || '',
-            listingType: merchant.listingType || 'Product',
-            category: merchant.category || 'General',
-            product: merchant.product,
-            price: merchant.price || 'Contact for price',
-            negotiation: merchant.negotiation === 'No' ? 'No' : 'Yes',
-            registeredSince: merchant.registeredAt || merchant.claimDate || '',
-            productCount: merchant.productCount || 1,
-            isVerified: merchant.isVerified ?? false,
-            verifiedStatus: merchant.verifiedStatus === 'YES' || merchant.isVerified ? 'YES' : 'PENDING',
-            isHighlyRecommended: isSpotlightBusiness(merchant.businessName || ''),
-          });
-        }
-
-        if (merchants.length === 0 && products.length === 0) {
-          await firestoreDb.syncMerchantsFromListings(DEFAULT_SEED_LISTINGS);
-          fetchedListings.push(...DEFAULT_SEED_LISTINGS);
-        }
+            const businessName = String(record.businessName || record.name || '').trim();
+            if (!businessName) return null;
+            return {
+              id: String(record.id || document.id),
+              userId: String(record.businessId || record.whatsapp || document.id),
+              businessName,
+              whatsapp: String(record.whatsapp || record.whatsappNumber || ''),
+              state: String(record.state || ''),
+              city: String(record.city || ''),
+              listingType: String(record.listingType || 'Product'),
+              category: String(record.category || 'General'),
+              product: String(record.product || businessName),
+              price: String(record.price || 'Contact for price'),
+              negotiation: record.negotiation === 'No' ? 'No' : 'Yes',
+              registeredSince: String(record.createdAt || ''),
+              productCount: 1,
+              isVerified: true,
+              verifiedStatus: 'YES',
+              profileImageUrl: String(record.profileImageUrl || ''),
+              productImages: Array.isArray(record.productImages) ? record.productImages : [],
+              isHighlyRecommended: isSpotlightBusiness(businessName),
+            } satisfies BusinessListing;
+          })
+          .filter((listing) => listing !== null);
 
         this.businessListings = fetchedListings;
         this.lastFirestoreSyncTime = now;
-        await meilisearchClient.syncListings(this.businessListings);
         return this.businessListings;
 
       },
@@ -1216,7 +1080,7 @@ class SheetsDatabaseService {
         timeoutMs: 8500,
         serviceName: 'Firestore',
         operationName: 'syncListingsFromFirestore',
-        fallbackValue: this.businessListings,
+        fallbackValue: [],
       }
     );
   }

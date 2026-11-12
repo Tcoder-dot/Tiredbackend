@@ -48,7 +48,21 @@ export async function saveCatalogMedia(
     console.warn(`[MediaStorage] Could not write ${cleanId} to disk:`, err);
   }
 
-  const cloudUrl = await uploadBufferToCloudinary(buffer, `catalog/${cleanId}`, mimeType);
+  let cloudUrl = '';
+  try {
+    cloudUrl = await uploadBufferToCloudinary(buffer, `catalog/${cleanId}`, mimeType);
+  } catch (err) {
+    if (process.env.NODE_ENV === 'production') {
+      mediaMemoryCache.delete(cleanId);
+      try {
+        if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
+      } catch (cleanupError) {
+        console.warn(`[MediaStorage] Could not remove incomplete upload ${cleanId}:`, cleanupError);
+      }
+      throw new Error('Persistent image storage is unavailable. Please retry the upload.', { cause: err });
+    }
+    console.warn(`[MediaStorage] Cloudinary unavailable for ${cleanId}; using local development storage.`, err);
+  }
   if (!cloudUrl && process.env.NODE_ENV === 'production') {
     mediaMemoryCache.delete(cleanId);
     try {

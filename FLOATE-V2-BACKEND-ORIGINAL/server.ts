@@ -1,4 +1,5 @@
 import express from "express";
+import type { Request, Response } from "express";
 import path from "path";
 import { readFile } from "node:fs/promises";
 import { randomUUID, timingSafeEqual } from "node:crypto";
@@ -13,10 +14,13 @@ import {
 } from "./src/bot/services/storefrontPaymentService.js";
 import { generateSitemapXML, generateRobotsTxt } from "./src/utils/sitemap";
 import searchRouter from "./routes/search";
-import v1Router, { consumeRegistrationVerificationToken, getAllProducts } from "./routes/v1";
+import v1Router, {
+  consumeRegistrationVerificationToken,
+  getAllProducts,
+  verifyRegistrationVerificationToken
+} from "./routes/v1";
 import { initializeMeilisearchIndexes } from "./config/meilisearch";
 import { extractCategoryIntent, normalizeFloateCategory } from "./services/intentExtractor";
-import { ANCHOR_BUSINESSES } from "./controllers/searchController";
 import { createMerchantSlug } from "./src/utils/merchantSlug";
 import { normalizeWhatsAppNumber } from "./src/utils/whatsapp";
 import { getAppBaseUrl, handleWhatsAppVerification, handleWhatsAppWebhook, sendWhatsAppMessage } from "./src/bot/services/whatsappService.js";
@@ -48,6 +52,7 @@ import sharp from "sharp";
 import firebaseConfig from "./firebase-applet-config.json";
 import { createPortfolioPreview, normalizePortfolioUrl } from "./src/services/portfolioPreviewService";
 import { adminFirestoreDb } from "./services/adminFirestore";
+import { publishApprovedBusiness } from "./services/publicCatalogService.js";
 
 dotenv.config();
 
@@ -69,6 +74,16 @@ const requireAdminApiKey: express.RequestHandler = (req, res, next) => {
   }
   next();
 };
+
+function isCloudinaryImageUrl(value: unknown): boolean {
+  if (typeof value !== "string" || !value.trim()) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "res.cloudinary.com";
+  } catch {
+    return false;
+  }
+}
 app.use(corsMiddleware);
 app.post(
   "/api/webhooks/bachs",
@@ -625,6 +640,62 @@ app.post(
   }
 );
 
+async function uploadRegistrationImage(
+  req: Request,
+  res: Response,
+  folder: string
+): Promise<Response> {
+  const phone = normalizeWhatsAppNumber(req.get("x-registration-phone") || "");
+  const token = req.get("x-registration-verification-token") || "";
+  if (!phone || !await verifyRegistrationVerificationToken(phone, token)) {
+    return res.status(401).json({ success: false, error: "Verify this WhatsApp number before uploading registration images." });
+  }
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+    return res.status(400).json({ success: false, error: "Select an image file to upload." });
+  }
+
+  const mimeType = String(req.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  const signatures: Record<string, (buffer: Buffer) => boolean> = {
+    "image/jpeg": (buffer) => buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff,
+    "image/png": (buffer) => buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+    "image/webp": (buffer) => buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP",
+  };
+  if (!signatures[mimeType] || !signatures[mimeType](req.body)) {
+    return res.status(400).json({ success: false, error: "Upload a valid JPG, PNG, or WebP image." });
+  }
+
+  try {
+    const normalizedImage = await sharp(req.body)
+      .rotate()
+      .resize(1600, 1600, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 85, mozjpeg: true })
+      .toBuffer();
+    const imageUrl = await uploadImageToCloudinary(normalizedImage, {
+      folder,
+      mimeType: "image/jpeg"
+    });
+    return res.status(201).json({ success: true, imageUrl });
+  } catch (error) {
+    console.error(`[Registration] Could not upload image to ${folder}:`, error);
+    return res.status(503).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Image storage is unavailable."
+    });
+  }
+}
+
+app.post(
+  "/api/register/business/profile-image",
+  express.raw({ type: () => true, limit: "8mb" }),
+  async (req, res) => uploadRegistrationImage(req, res, "floate/business-profiles")
+);
+
+app.post(
+  "/api/register/business/product-image",
+  express.raw({ type: () => true, limit: "8mb" }),
+  async (req, res) => uploadRegistrationImage(req, res, "floate/products")
+);
+
 app.post("/api/admin/ads", requireAdminApiKey, async (req, res) => {
   try {
     const fields = parseAdminAdPayload(req.body);
@@ -964,6 +1035,7 @@ app.post("/api/register/business", async (req, res) => {
   } = req.body;
   const intlPhone = normalizeWhatsAppNumber(phone) || "";
   const photo = profileImageUrl || selfieUrl || profilePhoto || "";
+  const initialProductImage = String(initialProduct?.image || "");
   const merchantSlug = normalizeRegistrationName(businessName);
 
   if (!merchantSlug || !normalizeWhatsAppNumber(phone)) {
@@ -976,6 +1048,9 @@ app.post("/api/register/business", async (req, res) => {
     }
   } catch {
     return res.status(400).json({ success: false, error: "A captured profile selfie is required to register." });
+  }
+  if (initialProductImage && !isCloudinaryImageUrl(initialProductImage)) {
+    return res.status(400).json({ success: false, error: "Upload the first product image before submitting registration." });
   }
 
   const registrationVerificationToken = String(req.body?.registrationVerificationToken || "");
@@ -1047,7 +1122,7 @@ app.post("/api/register/business", async (req, res) => {
     const initialProductList: any[] = [];
     if (initialProduct && initialProduct.name) {
       const numPrice = parseFloat(String(initialProduct.price || 0).replace(/[^0-9.]/g, "")) || 0;
-      const prodImg = initialProduct.image || "";
+      const prodImg = initialProductImage;
       const prodItem = {
         id: `prod_${intlPhone}_${Date.now()}`,
         title: initialProduct.name,
@@ -1119,6 +1194,10 @@ app.post("/api/register/business", async (req, res) => {
       marketLocation: marketHub || `${city}, ${state}`,
       description: resolvedDescription,
       bio: resolvedDescription,
+      profileImageUrl: photo,
+      profilePhotoUrl: photo,
+      avatarUrl: photo,
+      avatar_url: photo,
       verified: false,
       isVerified: false,
       verificationStatus: "PENDING_REVIEW",
@@ -1418,6 +1497,9 @@ app.post(
     const merchantCity = merchant.city || "Lagos";
     const merchantState = merchant.state || "Nigeria";
     const productImage = imageUrl || image || "";
+    if (productImage && !isCloudinaryImageUrl(productImage)) {
+      return res.status(400).json({ success: false, error: "Upload the product image to Cloudinary before saving." });
+    }
     const acceptedConditions = ["new", "used", "refurbished"] as const;
     const submittedCondition = typeof req.body.condition === "string"
       ? req.body.condition.trim().toLowerCase()
@@ -1475,6 +1557,7 @@ app.post(
     await merchantDoc.ref.set({
       products: [newProductObj, ...currentProducts]
     }, { merge: true });
+    if (isApprovedMerchant) await publishApprovedBusiness(merchantDoc.id);
     console.log(`[Firestore] New product ${prodName} (₦${numPrice}) saved for ${businessName} (${normalizedVendorPhone})`);
     return res.json({ success: true, product: newProductObj });
   } catch (err) {
@@ -1587,6 +1670,7 @@ app.patch(
         batch.set(merchantDoc.ref, { products: updatedProducts }, { merge: true });
       }
       await batch.commit();
+      await publishApprovedBusiness(merchantDoc.id);
       return res.json({ success: true, product: updatedProduct });
     } catch (error) {
       console.error("[Catalog] Failed to update product:", error);
@@ -1918,23 +2002,6 @@ async function findVendorByIdentifier(param: string) {
       }
     }
   } catch (err) {}
-
-  // Use anchor records only when no persisted merchant matched.
-  for (const [key, meta] of Object.entries(ANCHOR_BUSINESSES)) {
-    const anchorClean = meta.whatsapp.replace(/[^0-9]/g, "").replace(/^0+/, "");
-    const cityCode = ((meta.city || "LOS").replace(/[^a-zA-Z]/g, "").slice(0, 3) || "LOS").toUpperCase();
-    const phoneSuffix = (anchorClean.slice(-5) || "00525").padStart(5, '0');
-    const computedFid = `FLT-${cityCode}-${phoneSuffix}`.toUpperCase();
-
-    if (
-      rawParam.toUpperCase() === computedFid ||
-      (phoneNoLeadingZero && anchorClean === phoneNoLeadingZero) ||
-      rawParam.toLowerCase() === key.toLowerCase() ||
-      rawParam.toLowerCase() === meta.name.toLowerCase()
-    ) {
-      return buildMerchantPayload({ ...meta, fid: computedFid, verified: true, isVerified: true }, rawParam);
-    }
-  }
 
   return null;
 }
@@ -4952,41 +5019,26 @@ const REGISTERED_MERCHANT_CATALOG = [
   }
 ];
 
-// Helper to fetch live backend products catalog directly from Firestore
+// Read the same approved projection used by website and WhatsApp search.
 async function fetchBackendInventory(): Promise<any[]> {
   try {
-    const pSnap = await adminFirestoreDb.collection("products").get();
-    if (!pSnap.empty) {
-      const directItems: any[] = [];
-      pSnap.forEach(docSnap => {
-        const product = { id: docSnap.id, ...docSnap.data() };
-        directItems.push(toPublicCatalogProduct(product, product.vendor || {}));
-      });
-      return directItems;
-    }
-  } catch (err: any) {
-    console.warn("Direct Firestore products query notice:", err.message);
+    const snapshot = await adminFirestoreDb.collection("public_catalog")
+      .where("isPublished", "==", true)
+      .get();
+    return snapshot.docs
+      .map((document) => {
+        const record: Record<string, any> = { id: document.id, ...document.data() };
+        if (
+          record.isVerified !== true ||
+          String(record.verificationStatus || "").toUpperCase() !== "APPROVED"
+        ) return null;
+        return toPublicCatalogProduct(record, record);
+      })
+      .filter((product) => product !== null);
+  } catch (error) {
+    console.error("Could not read published public catalog:", error);
+    return [];
   }
-
-  // Fallback to Render backend API if Firestore collection is being provisioned
-  try {
-    const res = await fetch(`${FLOATE_API_BASE_URL}/api/catalog/products?limit=50`, {
-      headers: {
-        "x-api-key": FLOATE_API_KEY,
-        "Accept": "application/json"
-      }
-    });
-    if (res.ok) {
-      const d = await res.json();
-      const remoteItems = Array.isArray(d.products) ? d.products : (Array.isArray(d.results) ? d.results : []);
-      if (remoteItems.length > 0) {
-        return remoteItems.map((product: any) => toPublicCatalogProduct(product, product.vendor || {}));
-      }
-    }
-  } catch (e) {
-    // Non-blocking
-  }
-  return REGISTERED_MERCHANT_CATALOG;
 }
 
 // Helper to fetch live backend 24-hr status updates

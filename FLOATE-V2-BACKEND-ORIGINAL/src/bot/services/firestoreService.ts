@@ -21,6 +21,7 @@ import { sheetsDb, normalizePhone, BusinessListing, parsePriceToNumber, VendorMa
 import { extractInventoryFromVoiceOrPhoto, ExtractedInventoryData } from './aiService.js';
 import { withExternalTimeout } from './timeoutService.js';
 import { compactRelaySessionForStorage, STORAGE_LIMITS } from './storageOptimizer.js';
+import { publishWhatsAppListing } from '../../../services/publicCatalogService.js';
 
 // Load Firebase configuration from firebase-applet-config.json, environment variables, or bundled defaults
 const defaultFirebaseConfig = {
@@ -801,6 +802,8 @@ export class FirestoreService {
             }
             await updateDoc(merchantRef, this.sanitizeForFirestore(updates));
           }
+
+          await publishWhatsAppListing({ ...listing, verificationStatus: vStatus });
         }
       },
       {
@@ -1976,56 +1979,6 @@ export class FirestoreService {
   }
 
   /**
-   * Automatically verifies and guarantees seed merchants and initial credits on startup
-   */
-  public async ensureDefaultSeedMerchants(): Promise<void> {
-    try {
-      // 1. Ensure Rich Build is explicitly seeded and has 50 credits (25 free + 25 bought)
-      const richVariants = ['2347065599116', '07065599116', '7065599116', '+2347065599116'];
-      const richDoc: MerchantDoc = {
-        id: '2347065599116',
-        businessName: 'Rich Build',
-        ownerFullName: 'Rich Chukwuemeka',
-        whatsapp: '2347065599116',
-        userId: '2347065599116',
-        state: 'Enugu',
-        city: 'Enugu',
-        category: 'Website Development & Tech Solutions',
-        listingType: 'Service',
-        product: 'Website Development, Custom Software, Tech Solutions & Mobile Apps',
-        isVerified: true,
-        credit_balance: 50, // 25 Free Welcome Credits + 25 Purchased Credits
-        status: 'ACTIVE',
-        updatedAt: new Date().toISOString(),
-      };
-
-      for (const v of richVariants) {
-        const mRef = doc(db, 'merchants', v);
-        const snap = await getDoc(mRef);
-        if (snap.exists()) {
-          const existing = snap.data() as MerchantDoc;
-          await setDoc(mRef, this.sanitizeForFirestore({
-            ...richDoc,
-            id: v,
-            whatsapp: v,
-            credit_balance: typeof existing.credit_balance === 'number' ? existing.credit_balance : 50,
-          }), { merge: true });
-        } else {
-          await setDoc(mRef, this.sanitizeForFirestore({
-            ...richDoc,
-            id: v,
-            whatsapp: v,
-          }), { merge: true });
-        }
-      }
-
-      console.log('[Firestore] ✅ Verified and guaranteed Rich Build credits: 50 Floate Credits active');
-    } catch (e) {
-      console.warn('[Firestore] Notice seeding default merchants:', e);
-    }
-  }
-
-  /**
    * Records commerce events in Firestore.
    */
   private async logCommerceEvent(
@@ -2185,6 +2138,14 @@ export class FirestoreService {
       batch.set(doc(db, 'products', prodId), storefrontProduct);
       batch.set(doc(db, 'businesses', businessId), businessRecord, { merge: true });
       await batch.commit();
+      if (isVerified) {
+        await publishWhatsAppListing({
+          ...prodDoc,
+          id: prodId,
+          profileImageUrl: business.profilePhotoUrl || business.profileImageUrl || currentMerchant.profilePhotoUrl || "",
+          verificationStatus,
+        });
+      }
 
     } catch (err) {
       console.error('[Firestore] Error saving product listing:', err);

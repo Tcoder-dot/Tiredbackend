@@ -34,116 +34,6 @@ export interface MerchantHit {
   [key: string]: any;
 }
 
-// Anchor Database Definitions to prevent categorization errors and enforce verbatim registered locations
-interface AnchorDefinition {
-  name: string;
-  businessName: string;
-  category: string;
-  primaryCategory: string;
-  product: string;
-  location: string;
-  marketLocation: string;
-  city: string;
-  state: string;
-  whatsapp: string;
-  whatsappNumber: string;
-  initials: string;
-  categories?: string[];
-}
-
-export const ANCHOR_BUSINESSES: Record<string, AnchorDefinition> = {
-  "CHIVORA": {
-    name: "CHIVORA",
-    businessName: "CHIVORA",
-    category: "Footwear & Shoes",
-    primaryCategory: "Footwear & Shoes",
-    product: "Quality Leather Shoes, Slides & Slippers",
-    location: "Main Market, Onitsha, Anambra",
-    marketLocation: "Main Market, Onitsha, Anambra",
-    city: "Onitsha",
-    state: "Anambra",
-    whatsapp: "08139598835",
-    whatsappNumber: "08139598835",
-    initials: "CH",
-    categories: ["Footwear & Shoes", "Shoes", "Slides", "Slippers", "Leather"]
-  },
-  "MAKKY'S LUXE": {
-    name: "MAKKY'S LUXE",
-    businessName: "MAKKY'S LUXE",
-    category: "Beauty, Perfumes & Jewelry",
-    primaryCategory: "Beauty, Perfumes & Jewelry",
-    product: "Jewelries, Perfumes, Home & Event Decorations, Gift Packages",
-    location: "Main Market, Onitsha, Anambra",
-    marketLocation: "Main Market, Onitsha, Anambra",
-    city: "Onitsha",
-    state: "Anambra",
-    whatsapp: "07049113767",
-    whatsappNumber: "07049113767",
-    initials: "ML",
-    categories: ["Beauty, Perfumes & Jewelry", "Jewelries & Perfumes", "Perfumes", "Jewelries", "Fragrances", "Scents"]
-  },
-  "GOODY'S COLLECTION": {
-    name: "GOODY'S COLLECTION",
-    businessName: "GOODY'S COLLECTION",
-    category: "Footwear & Shoes",
-    primaryCategory: "Footwear & Shoes",
-    product: "Unisex Slippers, Leather Sandals & Slides",
-    location: "Main Market, Onitsha, Anambra",
-    marketLocation: "Main Market, Onitsha, Anambra",
-    city: "Onitsha",
-    state: "Anambra",
-    whatsapp: "08064292345",
-    whatsappNumber: "08064292345",
-    initials: "GC",
-    categories: ["Footwear & Shoes", "Shoes", "Slippers", "Slides", "Sandals", "Leather"]
-  },
-  "MBAMS PHONES & GADGETS": {
-    name: "MBAMS PHONES & GADGETS",
-    businessName: "MBAMS PHONES & GADGETS",
-    category: "Phones & Tablets",
-    primaryCategory: "Phones & Tablets",
-    product: "Smartphones, iPhones, UK Used Devices & Accessories",
-    location: "Computer Village, Ikeja, Lagos",
-    marketLocation: "Computer Village, Ikeja, Lagos",
-    city: "Ikeja",
-    state: "Lagos",
-    whatsapp: "08101234567",
-    whatsappNumber: "08101234567",
-    initials: "MP",
-    categories: ["Phones & Tablets", "Phones & Gadgets", "Smartphones", "iPhones", "Gadgets", "UK Used Devices"]
-  },
-  "JULES BOUTIQUE & APPAREL": {
-    name: "JULES BOUTIQUE & APPAREL",
-    businessName: "JULES BOUTIQUE & APPAREL",
-    category: "Fashion & Apparel",
-    primaryCategory: "Fashion & Apparel",
-    product: "Designer Handbags, Corporate & Casual Outfits, Dresses",
-    location: "Balogun Market, Lagos Island, Lagos",
-    marketLocation: "Balogun Market, Lagos Island, Lagos",
-    city: "Lagos Island",
-    state: "Lagos",
-    whatsapp: "08109876543",
-    whatsappNumber: "08109876543",
-    initials: "JB",
-    categories: ["Fashion & Apparel", "Bags & Luggage", "Designer Handbags", "Dresses", "Apparel", "Boutique"]
-  },
-  "RICH BUILD": {
-    name: "Rich Build",
-    businessName: "Rich Build",
-    category: "Tech & Digital Services",
-    primaryCategory: "Tech & Digital Services",
-    product: "Website Development, Custom Software & Tech Solutions",
-    location: "Enugu Tech Hub, Independence Layout, Enugu",
-    marketLocation: "Enugu Tech Hub, Independence Layout, Enugu",
-    city: "Enugu",
-    state: "Enugu",
-    whatsapp: "07065599116",
-    whatsappNumber: "07065599116",
-    initials: "RB",
-    categories: ["Tech & Digital Services", "Tech & Software Solutions", "Website Development", "Software", "Tech Solutions"]
-  }
-};
-
 function formatWhatsAppDirectLink(phone: string, businessName: string): string {
   const digits = (phone || "").replace(/[^0-9]/g, "");
   const intlPhone = digits.startsWith("0")
@@ -152,20 +42,13 @@ function formatWhatsAppDirectLink(phone: string, businessName: string): string {
     ? digits
     : digits
     ? "234" + digits
-    : "2348139598835";
-  return `https://wa.me/${intlPhone}?text=Hello%20${encodeURIComponent(businessName)},%20I%20saw%20your%20store%20on%20Floate`;
+    : "";
+  return intlPhone ? `https://wa.me/${intlPhone}?text=Hello%20${encodeURIComponent(businessName)},%20I%20saw%20your%20store%20on%20Floate` : "";
 }
 
 function getTwoLetterMonogram(name: string): string {
   if (!name) return "FL";
   const norm = name.trim().toUpperCase();
-  if (norm.includes("CHIVORA")) return "CH";
-  if (norm.includes("MAKKY")) return "ML";
-  if (norm.includes("GOODY")) return "GC";
-  if (norm.includes("MBAM")) return "MP";
-  if (norm.includes("JULE")) return "JB";
-  if (norm.includes("RICH BUILD")) return "RB";
-
   const words = norm.replace(/[^A-Z0-9\s]/g, "").split(/\s+/).filter(w => !["THE", "AND", "&", "OF", "CO", "LTD", "NIGERIA"].includes(w));
   if (words.length >= 2) return words[0][0] + words[1][0];
   if (words.length === 1 && words[0].length >= 2) return words[0].slice(0, 2);
@@ -178,103 +61,56 @@ let firestoreMerchantsCacheTime = 0;
 
 export async function getLiveFirestoreMerchants(): Promise<MerchantHit[]> {
   const now = Date.now();
-  if (firestoreMerchantsCache.length > 0 && now - firestoreMerchantsCacheTime < 30000) {
+  if (now - firestoreMerchantsCacheTime < 5000) {
     return firestoreMerchantsCache;
   }
   try {
-    const snap = await getDocs(collection(db, "businesses"));
-    const list: MerchantHit[] = [];
-    const addedAnchorKeys = new Set<string>();
+    const snapshot = await getDocs(collection(db, "public_catalog"));
+    const list = snapshot.docs
+      .map((document) => {
+        const data = document.data();
+        if (
+          data.isPublished !== true ||
+          data.isVerified !== true ||
+          String(data.verificationStatus || "").toUpperCase() !== "APPROVED"
+        ) return null;
 
-    snap.forEach((d) => {
-      const data = d.data();
-      const docId = d.id;
-
-      // Filter out test pings and fake synthetic duplicates
-      if (docId === "test_ping" || docId === "chivora-cosmetics") return;
-      const rawName = (data.name || data.businessName || "").trim();
-      if (!rawName || rawName.toLowerCase() === "undefined" || rawName.toLowerCase() === "chivora cosmetics") return;
-
-      const normName = rawName.toUpperCase();
-      let anchorMatch: AnchorDefinition | null = null;
-      for (const [key, meta] of Object.entries(ANCHOR_BUSINESSES)) {
-        if (normName.includes(key) || docId.toLowerCase().includes(key.toLowerCase().replace(/[^a-z0-9]/g, "-"))) {
-          anchorMatch = meta;
-          addedAnchorKeys.add(key);
-          break;
-        }
-      }
-
-      const name = anchorMatch?.name || rawName;
-      const category = anchorMatch?.category || data.category || data.primaryCategory || "Commercial Merchandise";
-      const product = anchorMatch?.product || data.product || data.bio || data.description || category;
-      const location = anchorMatch?.location || data.location || data.marketLocation || `${data.city || ""}, ${data.state || ""}`.replace(/^,\s*|,\s*$/g, "") || "Nigeria";
-      const phone = anchorMatch?.whatsapp || data.whatsapp || data.whatsappNumber || data.phone || "08139598835";
-      const initials = anchorMatch?.initials || getTwoLetterMonogram(name);
-
-      list.push({
-        id: data.id || docId,
-        name,
-        businessName: name,
-        slug: data.slug || docId,
-        category,
-        primaryCategory: category,
-        city: anchorMatch?.city || data.city || "Commercial Hub",
-        state: anchorMatch?.state || data.state || "Nigeria",
-        location,
-        marketLocation: location,
-        whatsappNumber: phone,
-        whatsapp: phone,
-        whatsappDeepLink: formatWhatsAppDirectLink(phone, name),
-        initials,
-        isVerified: true,
-        verified: true,
-        bio: data.bio || data.description || `${category} verified merchant in ${location}.`,
-        avatarUrl: data.avatarUrl,
-        product,
-        price: data.price || data.priceRange || "Contact for price",
-        lat: data.lat,
-        lng: data.lng,
-        categories: anchorMatch?.categories || data.categories || [category]
-      });
-    });
-
-    // Ensure all 6 anchor businesses exist in list
-    for (const [key, meta] of Object.entries(ANCHOR_BUSINESSES)) {
-      if (!addedAnchorKeys.has(key)) {
-        list.unshift({
-          id: `anchor_${key.toLowerCase().replace(/[^a-z0-9]/g, "_")}`,
-          name: meta.name,
-          businessName: meta.businessName,
-          slug: key.toLowerCase().replace(/[^a-z0-9]/g, "-"),
-          category: meta.category,
-          primaryCategory: meta.primaryCategory,
-          city: meta.city,
-          state: meta.state,
-          location: meta.location,
-          marketLocation: meta.marketLocation,
-          whatsappNumber: meta.whatsapp,
-          whatsapp: meta.whatsapp,
-          whatsappDeepLink: formatWhatsAppDirectLink(meta.whatsapp, meta.name),
-          initials: meta.initials,
+        const name = String(data.businessName || data.name || "").trim();
+        if (!name) return null;
+        const phone = String(data.whatsapp || data.whatsappNumber || "");
+        const location = String(data.marketLocation || data.location || [data.city, data.state].filter(Boolean).join(", "));
+        return {
+          id: String(data.id || document.id),
+          name,
+          businessName: name,
+          slug: String(data.slug || data.businessId || document.id),
+          category: String(data.category || "General"),
+          primaryCategory: String(data.category || "General"),
+          city: String(data.city || ""),
+          state: String(data.state || ""),
+          location,
+          marketLocation: location,
+          whatsappNumber: phone,
+          whatsapp: phone,
+          whatsappDeepLink: formatWhatsAppDirectLink(phone, name),
+          initials: getTwoLetterMonogram(name),
           isVerified: true,
           verified: true,
-          bio: `${meta.category} verified merchant in ${meta.location}.`,
-          product: meta.product,
-          price: "Contact for price",
-          categories: meta.categories || [meta.category]
-        });
-      }
-    }
-
-    if (list.length > 0) {
-      firestoreMerchantsCache = list;
-      firestoreMerchantsCacheTime = now;
-    }
-    return list;
+          bio: String(data.description || ""),
+          avatarUrl: String(data.profileImageUrl || ""),
+          product: String(data.product || ""),
+          price: String(data.price || "Contact for price"),
+        } satisfies MerchantHit;
+      })
+      .filter((merchant) => merchant !== null);
+    firestoreMerchantsCache = list;
+    firestoreMerchantsCacheTime = now;
+    return firestoreMerchantsCache;
   } catch (err: any) {
     console.error("Direct Firestore merchants query failed:", err.message);
-    return firestoreMerchantsCache;
+    firestoreMerchantsCache = [];
+    firestoreMerchantsCacheTime = 0;
+    return [];
   }
 }
 
