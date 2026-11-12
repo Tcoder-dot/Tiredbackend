@@ -1,8 +1,10 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, RequestHandler } from "express";
 import { GoogleGenAI, Type } from "@google/genai";
 import { collection, getDocs, doc, getDoc } from "firebase/firestore";
+import type { DocumentSnapshot } from "firebase-admin/firestore";
 import { randomInt, timingSafeEqual } from "node:crypto";
 import { firestoreDb } from "../server";
+import { adminFirestoreDb } from "../services/adminFirestore";
 import { createMerchantSlug } from "../src/utils/merchantSlug";
 import { normalizeWhatsAppNumber } from "../src/utils/whatsapp";
 import { isWhatsAppAuthConfigured, isWhatsAppConfigured } from "../src/bot/config.js";
@@ -11,6 +13,80 @@ import { sendWhatsAppMessage } from "../src/bot/services/whatsappService.js";
 import { formatPhoneNumber, whatsappAuthService } from "../src/bot/services/whatsappAuthService.js";
 
 const router = Router();
+
+const requireAdminApiKey: RequestHandler = (req, res, next) => {
+  const expectedKey = process.env.ADMIN_API_KEY || "";
+  const providedKey = req.get("x-admin-api-key") || "";
+  const expectedBuffer = Buffer.from(expectedKey);
+  const providedBuffer = Buffer.from(providedKey);
+
+  if (!expectedKey) {
+    return res.status(503).json({ success: false, error: "Admin API is not configured." });
+  }
+  if (expectedBuffer.length !== providedBuffer.length || !timingSafeEqual(expectedBuffer, providedBuffer)) {
+    return res.status(401).json({ success: false, error: "Admin authentication required." });
+  }
+  next();
+};
+
+type VerificationDecision = "approved" | "rejected";
+
+async function sendVerificationWhatsApp(
+  phone: string,
+  businessName: string,
+  decision: VerificationDecision,
+  rejectionReason = ""
+): Promise<{ sent: boolean; message: string }> {
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN || "";
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
+  const templateName = decision === "approved"
+    ? process.env.WHATSAPP_VERIFICATION_APPROVED_TEMPLATE || ""
+    : process.env.WHATSAPP_VERIFICATION_REJECTED_TEMPLATE || "";
+  const recipient = normalizeWhatsAppNumber(phone)?.replace(/\D/g, "") || "";
+
+  if (!accessToken || !phoneNumberId || !templateName) {
+    return { sent: false, message: "WhatsApp delivery is not configured for this decision template." };
+  }
+  if (!recipient) return { sent: false, message: "The business WhatsApp number is missing or invalid." };
+
+  const parameters = decision === "approved"
+    ? [{ type: "text", text: businessName }]
+    : [{ type: "text", text: businessName }, { type: "text", text: rejectionReason }];
+
+  try {
+    const apiVersion = process.env.WHATSAPP_API_VERSION || "v23.0";
+    const response = await fetch(`https://graph.facebook.com/${apiVersion}/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: recipient,
+        type: "template",
+        template: {
+          name: templateName,
+          language: { code: process.env.WHATSAPP_TEMPLATE_LANGUAGE || "en" },
+          components: [{ type: "body", parameters }]
+        }
+      })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        sent: false,
+        message: result?.error?.message || `WhatsApp Cloud API returned HTTP ${response.status}.`
+      };
+    }
+    return { sent: true, message: "WhatsApp notification sent." };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "WhatsApp delivery failed.";
+    console.error("[Admin Verifications] WhatsApp delivery failed:", message);
+    return { sent: false, message };
+  }
+}
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY || "dummy_gemini_key",
@@ -1699,64 +1775,262 @@ router.post(["/verify/submit", "/api/v1/verify/submit"], async (req: Request, re
   }
 });
 
-router.get("/api/v1/admin/verifications", async (req: Request, res: Response) => {
-  const status = req.query.status as string;
+async function findVerificationApplication(vendorId: string): Promise<DocumentSnapshot | null> {
+  const candidateIds = [vendorId];
+  if (!vendorId.startsWith("vendor_")) {
+    const phone = normalizeWhatsAppNumber(vendorId);
+    if (phone) candidateIds.push(`vendor_${phone}`);
+  }
+
+  for (const candidateId of candidateIds) {
+    const candidate = await adminFirestoreDb.collection("business_verification_applications").doc(candidateId).get();
+    if (candidate.exists) return candidate;
+  }
+  return null;
+}
+
+router.get("/api/v1/admin/verifications", requireAdminApiKey, async (req: Request, res: Response) => {
+  const requestedStatus = String(req.query.status || "all").toLowerCase();
   try {
-    const remoteUrl = status 
-      ? `${BACKEND_BASE}/api/v1/admin/verifications?status=${encodeURIComponent(status)}`
-      : `${BACKEND_BASE}/api/v1/admin/verifications`;
-    const remoteRes = await fetch(remoteUrl, {
-      headers: { "x-admin-api-key": req.get("x-admin-api-key") || "" }
+    const [snapshot, evidenceSnapshot] = await Promise.all([
+      adminFirestoreDb.collection("business_verification_applications").get(),
+      adminFirestoreDb.collection("business_verification_evidence").get()
+    ]);
+    const evidenceByVendor = new Map<string, Record<string, unknown>[]>();
+    for (const evidenceDoc of evidenceSnapshot.docs) {
+      const evidence = evidenceDoc.data();
+      const vendorId = String(evidence.vendor_id || evidence.vendorId || "");
+      if (!vendorId) continue;
+      const vendorEvidence = evidenceByVendor.get(vendorId) || [];
+      vendorEvidence.push(evidence);
+      evidenceByVendor.set(vendorId, vendorEvidence);
+    }
+
+    const applications = snapshot.docs.map((verificationDoc) => {
+      const record = verificationDoc.data();
+      const rawStatus = String(record.status || record.verification_status || "").toLowerCase();
+      const status = rawStatus === "pending" || rawStatus === "under_review" ? "pending_review" : rawStatus;
+      const registrationData = record.registration_data && typeof record.registration_data === "object"
+        ? record.registration_data
+        : {};
+      return {
+        ...record,
+        id: verificationDoc.id,
+        vendor_id: record.vendor_id || record.vendorId || verificationDoc.id,
+        business_name: record.business_name || record.businessName || "",
+        owner_name: record.owner_name || record.ownerName || "",
+        market: record.market || record.marketHub || record.marketLocation || "",
+        city: record.city || "",
+        whatsapp: record.whatsapp || record.phone || record.whatsappNumber || "",
+        products: record.products || record.initialProduct?.name || "",
+        status: status || (record.isVerified === true || record.verified === true ? "approved" : "pending_review"),
+        submitted_at: record.submitted_at || record.submittedAt || record.createdAt || "",
+        registration_data: registrationData,
+        visual_evidence: evidenceByVendor.get(String(record.vendor_id || record.vendorId || verificationDoc.id)) || []
+      };
+    }).filter((application) => {
+      if (requestedStatus === "all") return true;
+      if (requestedStatus === "pending_review") return ["pending_review", "submitted"].includes(application.status);
+      return application.status === requestedStatus;
+    }).sort((a, b) => new Date(b.submitted_at || 0).getTime() - new Date(a.submitted_at || 0).getTime());
+
+    return res.json({ success: true, verifications: applications, total: applications.length });
+  } catch (error) {
+    console.error("[Admin Verifications] Could not load registration queue:", error);
+    return res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : "Failed to fetch admin verifications"
     });
-    const data = await remoteRes.json();
-    return res.status(remoteRes.status).json(data);
-  } catch (err: any) {
-    return res.status(502).json({ success: false, message: err?.message || "Failed to fetch admin verifications" });
   }
 });
 
-router.post("/api/v1/admin/verifications/:vendorId/approve", async (req: Request, res: Response) => {
-  const { vendorId } = req.params;
+router.post("/api/v1/admin/verifications/:vendorId/approve", requireAdminApiKey, async (req: Request, res: Response) => {
   try {
-    const remoteRes = await fetch(`${BACKEND_BASE}/api/v1/admin/verifications/${encodeURIComponent(vendorId)}/approve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-admin-api-key": req.get("x-admin-api-key") || "" },
-      body: JSON.stringify(req.body)
+    const applicationSnapshot = await findVerificationApplication(req.params.vendorId);
+    if (!applicationSnapshot) {
+      return res.status(404).json({ success: false, message: "Registration application not found." });
+    }
+    const application = applicationSnapshot.data() || {};
+    const businessId = String(application.vendor_id || application.vendorId || applicationSnapshot.id);
+    const businessRef = adminFirestoreDb.collection("businesses").doc(businessId);
+    const businessSnapshot = await businessRef.get();
+    if (!businessSnapshot.exists) {
+      return res.status(404).json({ success: false, message: "Registered business record not found." });
+    }
+
+    const business = businessSnapshot.data() || {};
+    const businessName = String(
+      business.businessName || business.name || application.business_name || application.businessName || "Business"
+    );
+    const reviewedAt = new Date().toISOString();
+    const reviewerName = String(req.body?.reviewer_name || "Admin");
+    const approvedBusiness = {
+      verified: true,
+      isVerified: true,
+      verificationStatus: "APPROVED",
+      verification_status: "approved",
+      status: "ACTIVE",
+      verificationReason: "",
+      reviewedAt,
+      approvedAt: reviewedAt,
+      reviewerName,
+      certificateUrl: `/api/credentials/${encodeURIComponent(createMerchantSlug(businessName))}/download/certificate`,
+      updatedAt: reviewedAt
+    };
+
+    const batch = adminFirestoreDb.batch();
+    batch.set(businessRef, approvedBusiness, { merge: true });
+    batch.set(applicationSnapshot.ref, {
+      status: "approved",
+      verification_status: "approved",
+      reviewed_at: reviewedAt,
+      reviewer_name: reviewerName
+    }, { merge: true });
+    await batch.commit();
+
+    const notification = await sendVerificationWhatsApp(
+      String(business.whatsappNumber || business.whatsapp || business.phone || application.whatsapp || ""),
+      businessName,
+      "approved"
+    );
+    await applicationSnapshot.ref.set({
+      notification_status: notification.sent ? "sent" : "failed",
+      notification_error: notification.sent ? "" : notification.message
+    }, { merge: true });
+
+    return res.json({
+      success: true,
+      message: "Business approved.",
+      vendor: { id: businessId, ...business, ...approvedBusiness },
+      notificationSent: notification.sent,
+      notificationMessage: notification.message
     });
-    const data = await remoteRes.json();
-    return res.status(remoteRes.status).json(data);
-  } catch (err: any) {
-    return res.status(502).json({ success: false, message: err?.message || "Failed to approve merchant" });
+  } catch (error) {
+    console.error("[Admin Verifications] Approval failed:", error);
+    return res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : "Failed to approve merchant"
+    });
   }
 });
 
-router.post("/api/v1/admin/verifications/:vendorId/reject", async (req: Request, res: Response) => {
-  const { vendorId } = req.params;
+router.post("/api/v1/admin/verifications/:vendorId/reject", requireAdminApiKey, async (req: Request, res: Response) => {
+  const reason = String(req.body?.reason || "").trim();
+  if (!reason) return res.status(400).json({ success: false, message: "A rejection reason is required." });
+
   try {
-    const remoteRes = await fetch(`${BACKEND_BASE}/api/v1/admin/verifications/${encodeURIComponent(vendorId)}/reject`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-admin-api-key": req.get("x-admin-api-key") || "" },
-      body: JSON.stringify(req.body)
+    const applicationSnapshot = await findVerificationApplication(req.params.vendorId);
+    if (!applicationSnapshot) {
+      return res.status(404).json({ success: false, message: "Registration application not found." });
+    }
+    const application = applicationSnapshot.data() || {};
+    const businessId = String(application.vendor_id || application.vendorId || applicationSnapshot.id);
+    const businessRef = adminFirestoreDb.collection("businesses").doc(businessId);
+    const businessSnapshot = await businessRef.get();
+    if (!businessSnapshot.exists) {
+      return res.status(404).json({ success: false, message: "Registered business record not found." });
+    }
+
+    const business = businessSnapshot.data() || {};
+    const businessName = String(
+      business.businessName || business.name || application.business_name || application.businessName || "Business"
+    );
+    const reviewedAt = new Date().toISOString();
+    const reviewerName = String(req.body?.reviewer_name || "Admin");
+    const rejectedBusiness = {
+      verified: false,
+      isVerified: false,
+      verificationStatus: "REJECTED",
+      verification_status: "rejected",
+      status: "REJECTED",
+      verificationReason: reason,
+      reviewedAt,
+      reviewerName,
+      updatedAt: reviewedAt
+    };
+
+    const batch = adminFirestoreDb.batch();
+    batch.set(businessRef, rejectedBusiness, { merge: true });
+    batch.set(applicationSnapshot.ref, {
+      status: "rejected",
+      verification_status: "rejected",
+      rejection_reason: reason,
+      reviewed_at: reviewedAt,
+      reviewer_name: reviewerName
+    }, { merge: true });
+    await batch.commit();
+
+    const notification = await sendVerificationWhatsApp(
+      String(business.whatsappNumber || business.whatsapp || business.phone || application.whatsapp || ""),
+      businessName,
+      "rejected",
+      reason
+    );
+    await applicationSnapshot.ref.set({
+      notification_status: notification.sent ? "sent" : "failed",
+      notification_error: notification.sent ? "" : notification.message
+    }, { merge: true });
+
+    return res.json({
+      success: true,
+      message: "Business rejected.",
+      notificationSent: notification.sent,
+      notificationMessage: notification.message
     });
-    const data = await remoteRes.json();
-    return res.status(remoteRes.status).json(data);
-  } catch (err: any) {
-    return res.status(502).json({ success: false, message: err?.message || "Failed to reject merchant" });
+  } catch (error) {
+    console.error("[Admin Verifications] Rejection failed:", error);
+    return res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : "Failed to reject merchant"
+    });
   }
 });
 
-router.post("/api/v1/admin/verifications/:vendorId/notify", async (req: Request, res: Response) => {
-  const { vendorId } = req.params;
+router.post("/api/v1/admin/verifications/:vendorId/notify", requireAdminApiKey, async (req: Request, res: Response) => {
   try {
-    const remoteRes = await fetch(`${BACKEND_BASE}/api/v1/admin/verifications/${encodeURIComponent(vendorId)}/notify`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-admin-api-key": req.get("x-admin-api-key") || "" },
-      body: JSON.stringify(req.body)
+    const applicationSnapshot = await findVerificationApplication(req.params.vendorId);
+    if (!applicationSnapshot) {
+      return res.status(404).json({ success: false, message: "Registration application not found." });
+    }
+    const application = applicationSnapshot.data() || {};
+    const status = String(application.status || "").toLowerCase();
+    if (status !== "approved" && status !== "rejected") {
+      return res.status(409).json({
+        success: false,
+        message: "Only approved or rejected applications can receive a decision notification."
+      });
+    }
+
+    const businessId = String(application.vendor_id || application.vendorId || applicationSnapshot.id);
+    const businessSnapshot = await adminFirestoreDb.collection("businesses").doc(businessId).get();
+    if (!businessSnapshot.exists) {
+      return res.status(404).json({ success: false, message: "Registered business record not found." });
+    }
+    const business = businessSnapshot.data() || {};
+    const businessName = String(business.businessName || business.name || application.business_name || "Business");
+    const reason = String(application.rejection_reason || business.verificationReason || "");
+    const notification = await sendVerificationWhatsApp(
+      String(business.whatsappNumber || business.whatsapp || business.phone || application.whatsapp || ""),
+      businessName,
+      status,
+      reason
+    );
+    await applicationSnapshot.ref.set({
+      notification_status: notification.sent ? "sent" : "failed",
+      notification_error: notification.sent ? "" : notification.message
+    }, { merge: true });
+
+    return res.json({
+      success: true,
+      notificationSent: notification.sent,
+      notificationMessage: notification.message
     });
-    const data = await remoteRes.json();
-    return res.status(remoteRes.status).json(data);
-  } catch (err: any) {
-    return res.status(502).json({ success: false, message: err?.message || "Failed to send verification notification" });
+  } catch (error) {
+    console.error("[Admin Verifications] Notification retry failed:", error);
+    return res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : "Failed to send verification notification"
+    });
   }
 });
 
