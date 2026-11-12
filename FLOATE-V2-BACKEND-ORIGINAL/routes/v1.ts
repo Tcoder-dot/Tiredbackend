@@ -1705,7 +1705,9 @@ router.get("/api/v1/admin/verifications", async (req: Request, res: Response) =>
     const remoteUrl = status 
       ? `${BACKEND_BASE}/api/v1/admin/verifications?status=${encodeURIComponent(status)}`
       : `${BACKEND_BASE}/api/v1/admin/verifications`;
-    const remoteRes = await fetch(remoteUrl);
+    const remoteRes = await fetch(remoteUrl, {
+      headers: { "x-admin-api-key": req.get("x-admin-api-key") || "" }
+    });
     const data = await remoteRes.json();
     return res.status(remoteRes.status).json(data);
   } catch (err: any) {
@@ -1718,7 +1720,7 @@ router.post("/api/v1/admin/verifications/:vendorId/approve", async (req: Request
   try {
     const remoteRes = await fetch(`${BACKEND_BASE}/api/v1/admin/verifications/${encodeURIComponent(vendorId)}/approve`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-admin-api-key": req.get("x-admin-api-key") || "" },
       body: JSON.stringify(req.body)
     });
     const data = await remoteRes.json();
@@ -1733,13 +1735,28 @@ router.post("/api/v1/admin/verifications/:vendorId/reject", async (req: Request,
   try {
     const remoteRes = await fetch(`${BACKEND_BASE}/api/v1/admin/verifications/${encodeURIComponent(vendorId)}/reject`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-admin-api-key": req.get("x-admin-api-key") || "" },
       body: JSON.stringify(req.body)
     });
     const data = await remoteRes.json();
     return res.status(remoteRes.status).json(data);
   } catch (err: any) {
     return res.status(502).json({ success: false, message: err?.message || "Failed to reject merchant" });
+  }
+});
+
+router.post("/api/v1/admin/verifications/:vendorId/notify", async (req: Request, res: Response) => {
+  const { vendorId } = req.params;
+  try {
+    const remoteRes = await fetch(`${BACKEND_BASE}/api/v1/admin/verifications/${encodeURIComponent(vendorId)}/notify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-admin-api-key": req.get("x-admin-api-key") || "" },
+      body: JSON.stringify(req.body)
+    });
+    const data = await remoteRes.json();
+    return res.status(remoteRes.status).json(data);
+  } catch (err: any) {
+    return res.status(502).json({ success: false, message: err?.message || "Failed to send verification notification" });
   }
 });
 

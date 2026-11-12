@@ -47,6 +47,7 @@ import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, w
 import sharp from "sharp";
 import firebaseConfig from "./firebase-applet-config.json";
 import { createPortfolioPreview, normalizePortfolioUrl } from "./src/services/portfolioPreviewService";
+import { adminFirestoreDb } from "./services/adminFirestore";
 
 dotenv.config();
 
@@ -803,30 +804,6 @@ app.post("/api/buyer/inquire", async (req, res) => {
   return res.json({ success: true, message: "Inquiry recorded" });
 });
 
-const deliverRegistrationCertificate = async (input: {
-  businessName: string;
-  ownerName: string;
-  phone: string;
-}): Promise<boolean> => {
-  try {
-    const sent = await sendWhatsAppMessage(
-      input.phone,
-      `🎉 Congratulations${input.ownerName ? `, *${input.ownerName}*` : ''}! Your business *${input.businessName || "Floate"}* is registered with Floate.\n\n` +
-      `Your personalized business certificate is ready. Tap below to receive the certificate image on WhatsApp.`,
-      {
-        quickReplies: [
-          { id: "btn_download_certificate", title: "Download Certificate" },
-        ],
-      }
-    );
-    if (!sent) console.error(`[Registration] WhatsApp certificate delivery failed for +${input.phone}.`);
-    return sent;
-  } catch (error) {
-    console.error(`[Registration] Could not deliver certificate to +${input.phone}:`, error);
-    return false;
-  }
-};
-
 const normalizeRegistrationName = (name: unknown): string =>
   createMerchantSlug(String(name || ""));
 
@@ -959,12 +936,11 @@ app.post("/api/register/business", async (req, res) => {
           remoteData || { success: false, error: "Backend returned an invalid registration response." }
         );
       }
-      remoteData.certificateSent = await deliverRegistrationCertificate({
-        businessName: String(businessName || "Floate Merchant"),
-        ownerName: String(ownerName || businessName || ""),
-        phone: intlPhone,
-      });
       remoteData.storeUrl = `/vendor/${merchantSlug}`;
+      remoteData.verified = false;
+      remoteData.isVerified = false;
+      remoteData.verification_status = "pending_review";
+      remoteData.status = "pending_review";
       return res.status(remoteRes.status).json(remoteData);
     } catch (e) {
       console.error("[Server] Configured upstream registration failed:", e);
@@ -1069,9 +1045,11 @@ app.post("/api/register/business", async (req, res) => {
       selfieUrl: photo,
       description: resolvedDescription,
       bio: resolvedDescription,
-      verified: true,
-      isVerified: true,
-      verification_status: "verified",
+      verified: false,
+      isVerified: false,
+      verificationStatus: "PENDING_REVIEW",
+      verification_status: "pending_review",
+      status: "PENDING_REVIEW",
       credits: 25,
       initialProduct: initialProduct || null,
       products: initialProductList,
@@ -1127,21 +1105,42 @@ app.post("/api/register/business", async (req, res) => {
       });
     }
 
-    console.log(`[Floate OS] Automatically Verified New Merchant: ${businessName} (${intlPhone}) in ${marketHub || city}.`);
-    const certificateSent = await deliverRegistrationCertificate({
-      businessName: String(businessName || "Market Merchant"),
-      ownerName: String(ownerName || businessName || ""),
+    const applicationSubmittedAt = new Date().toISOString();
+    await adminFirestoreDb.collection("business_verification_applications").doc(docId).set({
+      id: docId,
+      vendor_id: docId,
+      business_id: docId,
+      business_name: businessName || "Market Merchant",
+      owner_name: ownerName || "",
+      whatsapp: intlPhone,
       phone: intlPhone,
-    });
+      market: marketHub || `${city || "Lagos"}, ${state || "Nigeria"}`,
+      marketHub: marketHub || "",
+      city: city || "Lagos",
+      state: state || "Nigeria",
+      category: category || "General Merchandise",
+      products: initialProduct?.name || "",
+      initialProduct: initialProduct || null,
+      profile_photo_url: photo,
+      status: "pending_review",
+      verification_status: "pending_review",
+      registration_data: req.body,
+      submitted_at: applicationSubmittedAt,
+      createdAt: applicationSubmittedAt,
+      notification_status: "not_sent"
+    }, { merge: true });
+
+    console.log(`[Floate OS] New merchant queued for admin review: ${businessName} (${intlPhone}) in ${marketHub || city}.`);
 
     return res.json({
       success: true,
-      message: "Business successfully registered and 100% verified automatically!",
-      certificateSent,
+      message: "Business registration submitted and is awaiting admin review.",
       phone: intlPhone,
       storeUrl: `/vendor/${merchantSlug}`,
-      verified: true,
-      isVerified: true,
+      verified: false,
+      isVerified: false,
+      verification_status: "pending_review",
+      status: "pending_review",
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
@@ -1206,6 +1205,12 @@ app.get("/api/credentials/:slug/download/certificate", async (req, res) => {
   if (!identifier) return res.status(400).json({ success: false, error: "Merchant identifier is required." });
 
   try {
+    const merchant = await findVendorByIdentifier(identifier);
+    if (!merchant) return res.status(404).json({ success: false, error: "Business not found." });
+    if (!isMerchantVerificationApproved(merchant)) {
+      return res.status(403).json({ success: false, error: "A certificate is available after admin approval." });
+    }
+
     let credential: Awaited<ReturnType<typeof resolveCredential>> = null;
     const merchantPhone = normalizeWhatsAppNumber(identifier);
     if (merchantPhone) {
@@ -2496,25 +2501,11 @@ app.get("/api/v1/assets/square-boost/:fid", async (req, res) => {
 });
 
 // Admin Verification Endpoint: POST /api/admin/verifications/:id/approve
-app.post("/api/admin/verifications/:id/approve", requireAdminApiKey, async (req, res) => {
-  try {
-    const rawId = req.params.id;
-    const vendorId = rawId.startsWith("vendor_") ? rawId : `vendor_${rawId.replace(/[^0-9]/g, "")}`;
-    await setDoc(doc(firestoreDb, "businesses", vendorId), {
-      verified: true,
-      isVerified: true,
-      verification_status: "approved"
-    }, { merge: true });
-
-    await setDoc(doc(firestoreDb, "verifications", rawId), {
-      status: "approved",
-      reviewed_at: new Date().toISOString()
-    }, { merge: true });
-
-    return res.json({ success: true, message: `Merchant verified successfully.` });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
-  }
+app.post("/api/admin/verifications/:id/approve", requireAdminApiKey, (_req, res) => {
+  return res.status(410).json({
+    success: false,
+    error: "This endpoint is retired. Use /api/v1/admin/verifications/:vendorId/approve."
+  });
 });
 
 // Vendor Products Route
