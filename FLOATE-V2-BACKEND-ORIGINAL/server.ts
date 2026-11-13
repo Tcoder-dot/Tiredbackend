@@ -1885,6 +1885,10 @@ function buildMerchantPayload(matchedVendor: any, rawParam: string = "") {
   const fid = matchedVendor.fid || `FLT-${cityCode}-${phoneSuffix}`;
   const badgeUrl = matchedVendor.badgeUrl || "https://i.postimg.cc/mkSLsdxb/20260929-122817.jpg";
   const masterSealUrl = matchedVendor.masterSealUrl || "https://i.postimg.cc/mkSLsdxb/20260929-122817.jpg";
+  const profilePhotoUrl = matchedVendor.profilePhotoUrl || matchedVendor.profile_photo_url ||
+    matchedVendor.profileImageUrl || matchedVendor.profile_image_url || matchedVendor.selfieUrl || "";
+  const avatarUrl = profilePhotoUrl || matchedVendor.avatarUrl || matchedVendor.avatar_url ||
+    matchedVendor.publicAvatarUrl || badgeUrl;
 
   const certificateUrl = `/api/v1/assets/certificate/${encodeURIComponent(fid)}`;
   const badgeCardUrl = `/api/v1/assets/badge-card/${encodeURIComponent(fid)}`;
@@ -1927,8 +1931,10 @@ function buildMerchantPayload(matchedVendor: any, rawParam: string = "") {
     isVerified: isVendorVerified,
     verificationStatus: getMerchantVerificationStatus(matchedVendor),
     verification_status: getMerchantVerificationStatus(matchedVendor).toLowerCase(),
-    avatarUrl: matchedVendor.publicAvatarUrl || badgeUrl,
-    avatar_url: matchedVendor.publicAvatarUrl || badgeUrl,
+    profilePhotoUrl,
+    profileImageUrl: profilePhotoUrl,
+    avatarUrl,
+    avatar_url: avatarUrl,
     initials: matchedVendor.initials || vName.slice(0, 2).toUpperCase(),
     whatsappDeepLink: deepLink,
     products: Array.isArray(matchedVendor.products)
