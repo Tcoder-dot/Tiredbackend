@@ -644,7 +644,8 @@ app.post(
 async function uploadRegistrationImage(
   req: Request,
   res: Response,
-  folder: string
+  folder: string,
+  file: { buffer: Buffer; size: number; mimetype: string } | undefined = req.file
 ): Promise<Response> {
   const phone = normalizeWhatsAppNumber(req.get("x-registration-phone") || "");
   const token = req.get("x-registration-verification-token") || "";
@@ -652,9 +653,12 @@ async function uploadRegistrationImage(
     console.warn("[Registration] Rejected an image upload without a valid WhatsApp verification token.");
     return res.status(401).json({ success: false, error: "WhatsApp verification is missing, expired, or for a different number. Verify the number again." });
   }
-  const file = req.file;
   if (!file || file.size === 0) {
-    return res.status(400).json({ success: false, error: "Select an image file to upload." });
+    console.warn("[Registration] Image upload contained no file:", {
+      contentType: req.get("content-type"),
+      contentLength: req.get("content-length")
+    });
+    return res.status(400).json({ success: false, error: "No image file was received. Select the image again and retry." });
   }
   if (
     file.mimetype !== "image/jpeg" ||
@@ -690,10 +694,11 @@ const registrationImageUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 8 * 1024 * 1024, files: 1, fields: 0 }
 });
+const registrationRawImageUpload = express.raw({ type: () => true, limit: "8mb" });
 
 function registrationImageUploadHandler(folder: string) {
   return (req: Request, res: Response, next: express.NextFunction) => {
-    registrationImageUpload.single("image")(req, res, (error) => {
+    const handleParsedUpload = (error?: unknown) => {
       if (error) {
         console.error("[Registration] Multipart image parsing failed:", error);
         const tooLarge = error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE";
@@ -703,6 +708,34 @@ function registrationImageUploadHandler(folder: string) {
         });
       }
       void uploadRegistrationImage(req, res, folder).catch(next);
+    };
+
+    if (req.is("multipart/form-data")) {
+      return registrationImageUpload.single("image")(req, res, handleParsedUpload);
+    }
+
+    return registrationRawImageUpload(req, res, (error) => {
+      if (error) {
+        console.error("[Registration] Raw image parsing failed:", error);
+        const tooLarge = error.type === "entity.too.large";
+        return res.status(tooLarge ? 413 : 400).json({
+          success: false,
+          error: tooLarge ? "Image is too large. Choose an image no larger than 8 MB." : "Upload one JPEG image."
+        });
+      }
+      const rawBody = Buffer.isBuffer(req.body) ? req.body : undefined;
+      const mimeType = String(req.get("content-type") || "").split(";")[0].trim().toLowerCase();
+      const isJpeg = Boolean(
+        rawBody &&
+        rawBody.length >= 3 &&
+        rawBody[0] === 0xff &&
+        rawBody[1] === 0xd8 &&
+        rawBody[2] === 0xff
+      );
+      const rawFile = rawBody
+        ? { buffer: rawBody, size: rawBody.length, mimetype: isJpeg ? "image/jpeg" : mimeType }
+        : undefined;
+      void uploadRegistrationImage(req, res, folder, rawFile).catch(next);
     });
   };
 }
