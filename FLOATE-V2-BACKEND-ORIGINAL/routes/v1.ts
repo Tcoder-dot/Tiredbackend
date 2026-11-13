@@ -46,11 +46,30 @@ const requireWhatsAppBearer: RequestHandler = (req, res, next) => {
 
 type VerificationDecision = "approved" | "rejected";
 
+function buildCertificateDownloadUrl(
+  businessId: string,
+  businessName: string,
+  business: Record<string, unknown>,
+  application: Record<string, unknown>
+) {
+  const identifier = createMerchantSlug(businessName) || normalizeWhatsAppNumber(
+    business.whatsappNumber || business.whatsapp || business.phone || application.whatsapp || ""
+  ) || businessId;
+  const backendUrl = (
+    process.env.RENDER_EXTERNAL_URL ||
+    process.env.FLOATE_BACKEND_PUBLIC_URL ||
+    process.env.APP_URL ||
+    "https://tiredbackend.onrender.com"
+  ).replace(/\/+$/, "");
+  return `${backendUrl}/api/credentials/${encodeURIComponent(identifier)}/download/certificate`;
+}
+
 async function sendVerificationWhatsApp(
   phone: string,
   businessName: string,
   decision: VerificationDecision,
-  rejectionReason = ""
+  rejectionReason = "",
+  certificateUrl = ""
 ): Promise<{ sent: boolean; message: string }> {
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN || "";
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
@@ -60,12 +79,23 @@ async function sendVerificationWhatsApp(
   const recipient = normalizeWhatsAppNumber(phone)?.replace(/\D/g, "") || "";
 
   if (!accessToken || !phoneNumberId || !templateName) {
-    return { sent: false, message: "WhatsApp delivery is not configured for this decision template." };
+    const message = "WhatsApp delivery is missing an access token, phone-number ID, or decision template.";
+    console.error(`[Admin Verifications] ${decision} notification was not sent: ${message}`);
+    return { sent: false, message };
   }
-  if (!recipient) return { sent: false, message: "The business WhatsApp number is missing or invalid." };
+  if (!recipient) {
+    const message = "The business WhatsApp number is missing or invalid.";
+    console.error(`[Admin Verifications] ${decision} notification was not sent: ${message}`);
+    return { sent: false, message };
+  }
 
   const parameters = decision === "approved"
-    ? [{ type: "text", text: businessName }]
+    ? [{
+        type: "text",
+        text: certificateUrl
+          ? `${businessName} is approved on FLOATE. Download your Floate certificate: ${certificateUrl}`
+          : `${businessName} is approved on FLOATE.`
+      }]
     : [{ type: "text", text: businessName }, { type: "text", text: rejectionReason }];
 
   try {
@@ -90,6 +120,7 @@ async function sendVerificationWhatsApp(
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
+      console.error(`[Admin Verifications] Meta rejected ${decision} notification (HTTP ${response.status}):`, result?.error || result);
       return {
         sent: false,
         message: result?.error?.message || `WhatsApp Cloud API returned HTTP ${response.status}.`
@@ -1940,6 +1971,7 @@ router.post("/api/v1/admin/verifications/:vendorId/approve", requireAdminApiKey,
     );
     const reviewedAt = new Date().toISOString();
     const reviewerName = String(req.body?.reviewer_name || "Admin");
+    const certificateUrl = buildCertificateDownloadUrl(businessId, businessName, business, application);
     const approvedBusiness = {
       verified: true,
       isVerified: true,
@@ -1950,7 +1982,7 @@ router.post("/api/v1/admin/verifications/:vendorId/approve", requireAdminApiKey,
       reviewedAt,
       approvedAt: reviewedAt,
       reviewerName,
-      certificateUrl: `/api/credentials/${encodeURIComponent(createMerchantSlug(businessName))}/download/certificate`,
+      certificateUrl,
       updatedAt: reviewedAt
     };
 
@@ -1963,12 +1995,20 @@ router.post("/api/v1/admin/verifications/:vendorId/approve", requireAdminApiKey,
       reviewer_name: reviewerName
     }, { merge: true });
     await batch.commit();
-    await publishApprovedBusiness(businessId);
+    let catalogError = "";
+    try {
+      await publishApprovedBusiness(businessId);
+    } catch (error) {
+      catalogError = error instanceof Error ? error.message : "Public catalog publishing failed.";
+      console.error(`[Admin Verifications] Business ${businessId} was approved but could not be published to the public catalog:`, error);
+    }
 
     const notification = await sendVerificationWhatsApp(
       String(business.whatsappNumber || business.whatsapp || business.phone || application.whatsapp || ""),
       businessName,
-      "approved"
+      "approved",
+      "",
+      certificateUrl
     );
     await applicationSnapshot.ref.set({
       notification_status: notification.sent ? "sent" : "failed",
@@ -1977,8 +2017,10 @@ router.post("/api/v1/admin/verifications/:vendorId/approve", requireAdminApiKey,
 
     return res.json({
       success: true,
-      message: "Business approved.",
+      message: catalogError ? "Business approved, but public catalog publishing failed." : "Business approved.",
       vendor: { id: businessId, ...business, ...approvedBusiness },
+      catalogPublished: !catalogError,
+      catalogError: catalogError || undefined,
       notificationSent: notification.sent,
       notificationMessage: notification.message
     });
@@ -2091,7 +2133,12 @@ router.post("/api/v1/admin/verifications/:vendorId/notify", requireAdminApiKey, 
       String(business.whatsappNumber || business.whatsapp || business.phone || application.whatsapp || ""),
       businessName,
       status,
-      reason
+      reason,
+      status === "approved"
+        ? (/^https?:\/\//i.test(String(business.certificateUrl || ""))
+            ? String(business.certificateUrl)
+            : buildCertificateDownloadUrl(businessId, businessName, business, application))
+        : ""
     );
     await applicationSnapshot.ref.set({
       notification_status: notification.sent ? "sent" : "failed",

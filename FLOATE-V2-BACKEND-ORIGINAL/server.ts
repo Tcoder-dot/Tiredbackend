@@ -5296,8 +5296,17 @@ app.get("/api/storefront/merchants/:slug", async (req, res) => {
       whatsapp: merchantPhone,
       whatsappNumber: merchantPhone,
       phone: merchantPhone,
-      avatarUrl: merchantData.publicAvatarUrl || getMerchantAvatar(merchantName, merchantData.category),
-      avatar_url: merchantData.publicAvatarUrl || getMerchantAvatar(merchantName, merchantData.category),
+      avatarUrl: merchantData.profilePhotoUrl || merchantData.profile_photo_url ||
+        merchantData.profileImageUrl || merchantData.profile_image_url || merchantData.selfieUrl ||
+        merchantData.avatarUrl || merchantData.avatar_url || merchantData.publicAvatarUrl ||
+        getMerchantAvatar(merchantName, merchantData.category),
+      avatar_url: merchantData.profilePhotoUrl || merchantData.profile_photo_url ||
+        merchantData.profileImageUrl || merchantData.profile_image_url || merchantData.selfieUrl ||
+        merchantData.avatarUrl || merchantData.avatar_url || merchantData.publicAvatarUrl ||
+        getMerchantAvatar(merchantName, merchantData.category),
+      profilePhotoUrl: merchantData.profilePhotoUrl || merchantData.profile_photo_url ||
+        merchantData.profileImageUrl || merchantData.profile_image_url || merchantData.selfieUrl ||
+        merchantData.avatarUrl || merchantData.avatar_url || "",
       verified,
       isVerified: verified,
       verificationStatus: getMerchantVerificationStatus(merchantData),
