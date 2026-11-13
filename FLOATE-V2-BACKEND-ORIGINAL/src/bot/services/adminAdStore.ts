@@ -191,7 +191,7 @@ export async function getBoostRequest(txRef: string): Promise<Record<string, unk
 export async function listBoostRequests(): Promise<Record<string, unknown>[]> {
   const snapshot = await boostRequestsCollection().get();
   return snapshot.docs
-    .map((document) => ({ ...document.data(), id: document.id }))
+    .map((document): Record<string, unknown> => ({ ...document.data(), id: document.id }))
     .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
 }
 

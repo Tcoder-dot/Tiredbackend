@@ -2,6 +2,7 @@ import { Router, Request, Response, RequestHandler } from "express";
 import { GoogleGenAI, Type } from "@google/genai";
 import type { DocumentSnapshot } from "firebase-admin/firestore";
 import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
+import jwt, { type JwtPayload } from "jsonwebtoken";
 import { adminFirestoreDb } from "../services/adminFirestore";
 import { publishApprovedBusiness, removeBusinessFromPublicCatalog } from "../services/publicCatalogService";
 import { createMerchantSlug } from "../src/utils/merchantSlug";
@@ -2199,43 +2200,122 @@ async function consumeWhatsAppOtp(canonicalPhone: string, code: string): Promise
   return true;
 }
 
-const REGISTRATION_VERIFICATION_TTL_SECONDS = 600;
+const REGISTRATION_VERIFICATION_TTL_SECONDS = 30 * 60;
+const REGISTRATION_VERIFICATION_ISSUER = "floate-registration";
 
 async function createRegistrationVerificationToken(phone: string): Promise<string> {
-  const token = randomBytes(32).toString("base64url");
-  const tokenHash = createHash("sha256").update(token).digest("hex");
-  const stored = await redisService.set(
-    `registration_phone_verification:${tokenHash}`,
-    { phone, expiresAt: Date.now() + REGISTRATION_VERIFICATION_TTL_SECONDS * 1000 },
-    REGISTRATION_VERIFICATION_TTL_SECONDS
+  const canonicalPhone = normalizeWhatsAppNumber(phone);
+  if (!canonicalPhone) throw new Error("A valid WhatsApp number is required for verification.");
+
+  const secret = process.env.FLOATE_JWT_SECRET || process.env.SESSION_SECRET || "";
+  if (secret.length < 32) {
+    throw new Error("FLOATE_JWT_SECRET must be configured with at least 32 characters.");
+  }
+
+  const token = jwt.sign(
+    { phone: canonicalPhone, jti: randomBytes(16).toString("hex") },
+    secret,
+    { expiresIn: REGISTRATION_VERIFICATION_TTL_SECONDS, issuer: REGISTRATION_VERIFICATION_ISSUER }
   );
-  if (!stored) throw new Error("Could not save phone verification proof.");
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const decoded = jwt.decode(token);
+  if (!decoded || typeof decoded === "string" || typeof decoded.exp !== "number") {
+    throw new Error("Could not create an expiring WhatsApp verification token.");
+  }
+  await adminFirestoreDb.collection("registration_phone_verifications").doc(canonicalPhone).set({
+    phone: canonicalPhone,
+    tokenHash,
+    expiresAt: new Date(decoded.exp * 1000),
+    createdAt: new Date()
+  });
   return token;
 }
 
+function getRegistrationVerificationClaims(phone: string, token: string): {
+  phone: string;
+  tokenHash: string;
+  expiresAt: number;
+} | null {
+  const canonicalPhone = normalizeWhatsAppNumber(phone);
+  if (!canonicalPhone || !token || token.length > 2048) return null;
+
+  const secret = process.env.FLOATE_JWT_SECRET || process.env.SESSION_SECRET || "";
+  if (secret.length < 32) {
+    throw new Error("FLOATE_JWT_SECRET must be configured with at least 32 characters.");
+  }
+
+  let decoded: string | JwtPayload;
+  try {
+    decoded = jwt.verify(token, secret, { issuer: REGISTRATION_VERIFICATION_ISSUER });
+  } catch {
+    return null;
+  }
+
+  if (
+    typeof decoded === "string" ||
+    decoded.phone !== canonicalPhone ||
+    typeof decoded.exp !== "number" ||
+    typeof decoded.jti !== "string" ||
+    decoded.exp * 1000 <= Date.now()
+  ) {
+    return null;
+  }
+
+  return {
+    phone: canonicalPhone,
+    tokenHash: createHash("sha256").update(token).digest("hex"),
+    expiresAt: decoded.exp * 1000
+  };
+}
+
+function getStoredVerificationExpiry(value: unknown): number {
+  if (value instanceof Date) return value.getTime();
+  if (value && typeof value === "object" && "toMillis" in value && typeof value.toMillis === "function") {
+    return value.toMillis();
+  }
+  return Number.NaN;
+}
+
 export async function consumeRegistrationVerificationToken(phone: string, token: string): Promise<boolean> {
-  if (!token || token.length > 128) return false;
-  const tokenHash = createHash("sha256").update(token).digest("hex");
-  const key = `registration_phone_verification:${tokenHash}`;
-  const record = await redisService.consumeIf<{ phone: string; expiresAt: number }>(
-    key,
-    (value) => value.expiresAt > Date.now() && value.phone === phone
-  );
-  return record !== null;
+  const claims = getRegistrationVerificationClaims(phone, token);
+  if (!claims) return false;
+
+  const verificationRef = adminFirestoreDb.collection("registration_phone_verifications").doc(claims.phone);
+  return adminFirestoreDb.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(verificationRef);
+    if (!snapshot.exists) return false;
+
+    const record = snapshot.data();
+    if (
+      record?.phone !== claims.phone ||
+      record?.tokenHash !== claims.tokenHash ||
+      getStoredVerificationExpiry(record?.expiresAt) !== claims.expiresAt ||
+      claims.expiresAt <= Date.now()
+    ) {
+      return false;
+    }
+
+    transaction.delete(verificationRef);
+    return true;
+  });
 }
 
 export async function verifyRegistrationVerificationToken(phone: string, token: string): Promise<boolean> {
-  if (!token || token.length > 128) return false;
-  const canonicalPhone = normalizeWhatsAppNumber(phone);
-  if (!canonicalPhone) return false;
-  const tokenHash = createHash("sha256").update(token).digest("hex");
-  const record = await redisService.get<{ phone: string; expiresAt: number }>(
-    `registration_phone_verification:${tokenHash}`
-  );
+  const claims = getRegistrationVerificationClaims(phone, token);
+  if (!claims) return false;
+
+  const snapshot = await adminFirestoreDb
+    .collection("registration_phone_verifications")
+    .doc(claims.phone)
+    .get();
+  if (!snapshot.exists) return false;
+
+  const record = snapshot.data();
   return Boolean(
-    record &&
-    record.expiresAt > Date.now() &&
-    normalizeWhatsAppNumber(record.phone) === canonicalPhone
+    record?.phone === claims.phone &&
+    record?.tokenHash === claims.tokenHash &&
+    getStoredVerificationExpiry(record?.expiresAt) === claims.expiresAt &&
+    claims.expiresAt > Date.now()
   );
 }
 
@@ -2275,7 +2355,7 @@ router.post(["/api/auth/whatsapp/send-otp", "/auth/whatsapp/send-otp"], async (r
   }
 
   try {
-    const { canonical } = formatPhoneNumber(phone);
+    const canonical = normalizeWhatsAppNumber(phone);
     if (!canonical) return res.status(400).json({ success: false, error: "A valid phone number is required." });
 
     const clientIp = req.ip || req.socket.remoteAddress || "unknown";
@@ -2300,6 +2380,7 @@ router.post(["/api/auth/whatsapp/send-otp", "/auth/whatsapp/send-otp"], async (r
 
     return res.json({ success: true, phone: canonical, message: "Verification code sent to WhatsApp." });
   } catch (error: any) {
+    console.error("[Registration] WhatsApp code delivery failed:", error);
     return res.status(502).json({ success: false, error: error.message || "WhatsApp could not deliver the verification code." });
   }
 });
@@ -2312,7 +2393,8 @@ router.post(["/api/auth/whatsapp/verify", "/auth/whatsapp/verify"], async (req: 
   }
 
   try {
-    const { canonical } = formatPhoneNumber(phone);
+    const canonical = normalizeWhatsAppNumber(phone);
+    if (!canonical) return res.status(400).json({ success: false, error: "A valid phone number is required." });
     if (!await consumeWhatsAppOtp(canonical, code)) {
       return res.status(400).json({ success: false, error: "Verification code is invalid or expired." });
     }
@@ -2325,6 +2407,7 @@ router.post(["/api/auth/whatsapp/verify", "/auth/whatsapp/verify"], async (req: 
       message: "WhatsApp phone verified successfully."
     });
   } catch (error: any) {
+    console.error("[Registration] WhatsApp code verification failed:", error);
     return res.status(503).json({ success: false, error: error.message || "Phone verification is unavailable." });
   }
 });
@@ -2337,12 +2420,14 @@ router.post("/api/auth/whatsapp/consume-registration-verification", async (req: 
   }
 
   try {
-    const { canonical } = formatPhoneNumber(phone);
+    const canonical = normalizeWhatsAppNumber(phone);
+    if (!canonical) return res.status(400).json({ success: false, error: "A valid phone number is required." });
     if (!await consumeRegistrationVerificationToken(canonical, token)) {
       return res.status(401).json({ success: false, error: "Phone verification proof is invalid, expired, or already used." });
     }
     return res.json({ success: true, phone: canonical });
   } catch (error: any) {
+    console.error("[Registration] Could not consume WhatsApp verification:", error);
     return res.status(503).json({ success: false, error: error.message || "Phone verification is unavailable." });
   }
 });

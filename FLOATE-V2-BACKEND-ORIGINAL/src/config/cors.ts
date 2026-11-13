@@ -11,6 +11,8 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction) 
   const origin = req.headers.origin;
   const configuredOrigins = [
     getPublicSiteUrl(),
+    'https://floate.xyz',
+    'https://www.floate.xyz',
     ...(process.env.CORS_ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()),
   ];
   const allowedOrigins = new Set(

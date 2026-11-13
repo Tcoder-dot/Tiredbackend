@@ -1,4 +1,5 @@
 import express from "express";
+import multer from "multer";
 import type { Request, Response } from "express";
 import path from "path";
 import { readFile } from "node:fs/promises";
@@ -47,7 +48,7 @@ import { createCredentialForMerchant } from "./src/bot/services/credentialServic
 import { flutterwaveService } from "./src/bot/services/flutterwaveService.js";
 import { SEO_HUBS_DATA } from "./src/data/seoHubs";
 import { initializeApp, getApps, getApp } from "firebase/app";
-import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch, runTransaction } from "firebase/firestore";
+import { getFirestore, collection, doc, getDoc, getDocs, setDoc, query, where, writeBatch } from "firebase/firestore";
 import sharp from "sharp";
 import firebaseConfig from "./firebase-applet-config.json";
 import { createPortfolioPreview, normalizePortfolioUrl } from "./src/services/portfolioPreviewService";
@@ -648,26 +649,27 @@ async function uploadRegistrationImage(
   const phone = normalizeWhatsAppNumber(req.get("x-registration-phone") || "");
   const token = req.get("x-registration-verification-token") || "";
   if (!phone || !await verifyRegistrationVerificationToken(phone, token)) {
-    return res.status(401).json({ success: false, error: "Verify this WhatsApp number before uploading registration images." });
+    console.warn("[Registration] Rejected an image upload without a valid WhatsApp verification token.");
+    return res.status(401).json({ success: false, error: "WhatsApp verification is missing, expired, or for a different number. Verify the number again." });
   }
-  if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+  const file = req.file;
+  if (!file || file.size === 0) {
     return res.status(400).json({ success: false, error: "Select an image file to upload." });
   }
-
-  const mimeType = String(req.get("content-type") || "").split(";")[0].trim().toLowerCase();
-  const signatures: Record<string, (buffer: Buffer) => boolean> = {
-    "image/jpeg": (buffer) => buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff,
-    "image/png": (buffer) => buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
-    "image/webp": (buffer) => buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP",
-  };
-  if (!signatures[mimeType] || !signatures[mimeType](req.body)) {
-    return res.status(400).json({ success: false, error: "Upload a valid JPG, PNG, or WebP image." });
+  if (
+    file.mimetype !== "image/jpeg" ||
+    file.buffer.length < 3 ||
+    file.buffer[0] !== 0xff ||
+    file.buffer[1] !== 0xd8 ||
+    file.buffer[2] !== 0xff
+  ) {
+    return res.status(400).json({ success: false, error: "Upload a valid JPEG image." });
   }
 
   try {
-    const normalizedImage = await sharp(req.body)
+    const normalizedImage = await sharp(file.buffer)
       .rotate()
-      .resize(1600, 1600, { fit: "inside", withoutEnlargement: true })
+      .resize(1200, 1200, { fit: "inside", withoutEnlargement: true })
       .jpeg({ quality: 85, mozjpeg: true })
       .toBuffer();
     const imageUrl = await uploadImageToCloudinary(normalizedImage, {
@@ -684,16 +686,35 @@ async function uploadRegistrationImage(
   }
 }
 
+const registrationImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 1, fields: 0 }
+});
+
+function registrationImageUploadHandler(folder: string) {
+  return (req: Request, res: Response, next: express.NextFunction) => {
+    registrationImageUpload.single("image")(req, res, (error) => {
+      if (error) {
+        console.error("[Registration] Multipart image parsing failed:", error);
+        const tooLarge = error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE";
+        return res.status(tooLarge ? 413 : 400).json({
+          success: false,
+          error: tooLarge ? "Image is too large. Choose an image no larger than 8 MB." : "Upload one JPEG image."
+        });
+      }
+      void uploadRegistrationImage(req, res, folder).catch(next);
+    });
+  };
+}
+
 app.post(
   "/api/register/business/profile-image",
-  express.raw({ type: () => true, limit: "8mb" }),
-  async (req, res) => uploadRegistrationImage(req, res, "floate/business-profiles")
+  registrationImageUploadHandler("floate/business-profiles")
 );
 
 app.post(
   "/api/register/business/product-image",
-  express.raw({ type: () => true, limit: "8mb" }),
-  async (req, res) => uploadRegistrationImage(req, res, "floate/products")
+  registrationImageUploadHandler("floate/products")
 );
 
 app.post("/api/admin/ads", requireAdminApiKey, async (req, res) => {
@@ -1053,9 +1074,16 @@ app.post("/api/register/business", async (req, res) => {
     return res.status(400).json({ success: false, error: "Upload the first product image before submitting registration." });
   }
 
-  const registrationVerificationToken = String(req.body?.registrationVerificationToken || "");
-  if (!await consumeRegistrationVerificationToken(intlPhone, registrationVerificationToken)) {
-    return res.status(401).json({ success: false, error: "Verify control of this WhatsApp number before registering." });
+  const registrationVerificationToken = req.get("x-registration-verification-token") ||
+    String(req.body?.registrationVerificationToken || "");
+  const registrationPhone = normalizeWhatsAppNumber(req.get("x-registration-phone") || phone);
+  if (
+    !registrationVerificationToken ||
+    registrationPhone !== intlPhone ||
+    !await verifyRegistrationVerificationToken(intlPhone, registrationVerificationToken)
+  ) {
+    console.warn("[Registration] Rejected a business submission without matching WhatsApp verification.");
+    return res.status(401).json({ success: false, error: "WhatsApp verification is missing, expired, or for a different number. Verify the number again." });
   }
 
   try {
@@ -1084,7 +1112,9 @@ app.post("/api/register/business", async (req, res) => {
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json",
-          "x-api-key": FLOATE_API_KEY
+          "x-api-key": FLOATE_API_KEY,
+          "x-registration-phone": intlPhone,
+          "x-registration-verification-token": registrationVerificationToken
         },
         body: JSON.stringify(req.body)
       });
@@ -1104,6 +1134,11 @@ app.post("/api/register/business", async (req, res) => {
       console.error("[Server] Configured upstream registration failed:", e);
       return res.status(502).json({ success: false, error: "Registration backend is unavailable. Please retry." });
     }
+  }
+
+  if (!await consumeRegistrationVerificationToken(intlPhone, registrationVerificationToken)) {
+    console.warn("[Registration] Rejected a business submission with an invalid or expired WhatsApp token.");
+    return res.status(401).json({ success: false, error: "WhatsApp verification is missing, expired, or for a different number. Verify the number again." });
   }
 
   // 2. Persist to Firestore: businesses collection, products collection, and verifications queue
@@ -1220,11 +1255,11 @@ app.post("/api/register/business", async (req, res) => {
         transaction.get(registrationPhoneKey),
         transaction.get(businessRef),
       ]);
-      if (nameKeySnapshot.exists() || phoneKeySnapshot.exists() || businessSnapshot.exists()) {
+      if (nameKeySnapshot.exists || phoneKeySnapshot.exists || businessSnapshot.exists) {
         return {
           conflict: true,
-          nameExists: nameKeySnapshot.exists(),
-          phoneExists: phoneKeySnapshot.exists() || businessSnapshot.exists(),
+          nameExists: nameKeySnapshot.exists,
+          phoneExists: phoneKeySnapshot.exists || businessSnapshot.exists,
         };
       }
 
@@ -1298,6 +1333,7 @@ app.post("/api/register/business", async (req, res) => {
       status: "pending_review",
     });
   } catch (err: any) {
+    console.error("[Registration] Could not persist business registration:", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1357,7 +1393,7 @@ app.get("/api/credentials/:slug/download/certificate", async (req, res) => {
     const merchantPhone = normalizeWhatsAppNumber(identifier);
     if (merchantPhone) {
       const businessSnapshot = await adminFirestoreDb.collection("businesses").doc(`vendor_${merchantPhone}`).get();
-      if (businessSnapshot.exists()) {
+      if (businessSnapshot.exists) {
         const business = businessSnapshot.data();
         const location = String(
           business.marketLocation ||
@@ -2206,7 +2242,7 @@ app.patch(
       }
 
       const changedAt = new Date().toISOString();
-      const transactionResult = await runTransaction(firestoreDb, async (transaction) => {
+      const transactionResult = await adminFirestoreDb.runTransaction(async (transaction) => {
         const snapshots = await Promise.all(matchingMerchantDocs.map((merchantDoc) => transaction.get(merchantDoc.ref)));
         const latestEligibility = snapshots
           .map((snapshot) => getProfileImageEligibility(snapshot.data() || {}, new Date(changedAt)))
@@ -5087,7 +5123,7 @@ app.get("/api/storefront/merchants/:slug", async (req, res) => {
     // 1. Direct Firestore Lookup for Merchant Profile
     try {
       const docSnap = await adminFirestoreDb.collection("businesses").doc(slugKey).get();
-      if (docSnap.exists()) {
+      if (docSnap.exists) {
         merchantData = docSnap.data();
       } else {
         const requestedPhone = normalizeWhatsAppNumber(slugKey);
@@ -5384,6 +5420,25 @@ function createHomePageSchema(): object {
       }
     ]
   };
+}
+
+function getMerchantGeo(merchant: {
+  coordinates?: unknown;
+  latitude?: unknown;
+  longitude?: unknown;
+  lat?: unknown;
+  lng?: unknown;
+}): { "@type": "GeoCoordinates"; latitude: number; longitude: number } | null {
+  const coordinates = merchant.coordinates && typeof merchant.coordinates === "object"
+    ? merchant.coordinates as { latitude?: unknown; longitude?: unknown; lat?: unknown; lng?: unknown }
+    : {};
+  const latitude = Number(coordinates.latitude ?? coordinates.lat ?? merchant.latitude ?? merchant.lat);
+  const longitude = Number(coordinates.longitude ?? coordinates.lng ?? merchant.longitude ?? merchant.lng);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+      latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+    return null;
+  }
+  return { "@type": "GeoCoordinates", latitude, longitude };
 }
 
 async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; status: number }> {

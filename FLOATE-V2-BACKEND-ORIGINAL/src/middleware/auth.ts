@@ -9,6 +9,7 @@ import { whatsappTokenService } from '../services/whatsappTokenService.js';
 
 export interface AuthenticatedUser {
   id: string;
+  sub?: string;
   role: 'vendor' | 'customer' | 'admin' | string;
   vendorId?: string;
   phone?: string;
