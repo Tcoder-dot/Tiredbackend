@@ -2015,6 +2015,7 @@ export class FirestoreService {
    * Saves or updates a product listing in Firestore as the primary single source of truth
    */
   public async saveProductListing(data: {
+    productId?: string;
     userId: number | string;
     businessName: string;
     whatsapp: string;
@@ -2033,7 +2034,7 @@ export class FirestoreService {
   }): Promise<ProductDoc> {
     const normPhone = normalizePhone(data.whatsapp);
     const merchantId = `biz-${normPhone || data.userId}`;
-    const prodId = `prod-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const prodId = data.productId || `prod-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const numPrice = parsePriceToNumber(data.price) || 0;
     const currentMerchant = await this.getMerchant(data.whatsapp);
     if (!currentMerchant) {
@@ -2089,6 +2090,7 @@ export class FirestoreService {
         price_naira: numPrice,
         photo_url: prodDoc.photoUrl || '',
         imageUrl: prodDoc.photoUrl || '',
+        photos: prodDoc.photoUrl ? [prodDoc.photoUrl] : [],
         vendorPhone: prodDoc.whatsapp,
         whatsappNumber: prodDoc.whatsapp,
         vendorName: prodDoc.businessName,

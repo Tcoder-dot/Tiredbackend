@@ -74,6 +74,7 @@ export interface WhatsAppReportDraft {
 
 export interface WhatsAppVendorAddDraft {
   step: 'STEP_1_PHOTO' | 'STEP_2_NAME' | 'STEP_3_PRICE' | 'STEP_4_DESC' | 'STEP_5_DISCOUNT' | 'STEP_6_CONFIRM' | 'NAME' | 'PRICE' | 'DESC' | 'CONFIRM';
+  productId?: string;
   photoUrl?: string;
   photoMediaId?: string;
   productName?: string;

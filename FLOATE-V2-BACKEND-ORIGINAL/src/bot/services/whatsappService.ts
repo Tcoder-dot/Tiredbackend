@@ -4742,6 +4742,17 @@ export async function processMasterWhatsAppEngine(params: {
   // Any ongoing product upload step (Name, Price, Photo/Specs)
   // MUST be intercepted here before first contact, visual search, or intent routing!
   // -------------------------------------------------------------
+  if (session.state === 'VENDOR_ADD_PRODUCT' && session.vendorAddDraft) {
+    await handleVendorAddProductWizard({
+      cleanPhone,
+      senderName,
+      text,
+      imageId: imageId || undefined,
+      imageMimeType,
+    });
+    return;
+  }
+
   if (
     session.state === 'VENDOR_ADD_PRODUCT_NAME' ||
     session.state === 'VENDOR_ADD_PRODUCT_AWAITING_PRICE' ||
@@ -4907,6 +4918,14 @@ export async function processMasterWhatsAppEngine(params: {
 
   if (imageId && isVendorProductUpload) {
     console.log(`[Vendor Catalog] 📸 Processing vendor product photo upload from +${cleanPhone}...`);
+    if (session.state === 'VENDOR_PORTAL' && !session.vendorAddDraft) {
+      await startVendorAddProduct(cleanPhone, senderName, {
+        imageId,
+        imageMimeType,
+        text,
+      });
+      return;
+    }
     await handleVendorProductPhotoUpload(cleanPhone, senderName, imageId, imageMimeType, text);
     return;
   }
@@ -8537,6 +8556,7 @@ export async function handleVendorAddProductWizard(params: {
 
   // Trigger keywords & intents
   const isAddTrigger =
+    text === 'btn_vendor_add_product' ||
     text === 'btn_add_product' ||
     text === 'btn_vendor_add' ||
     /^(?:i\s*want\s*to\s*upload(?:\s*my)?\s*product|i\s*want\s*to\s*post(?:\s*my)?\s*product|upload\s*product|post\s*product|add\s*product|post\s*item|upload\s*market|list\s*product|add\s*new\s*item|post\s*new\s*product|i\s*wan\s*post\s*my\s*product|i\s*wan\s*upload\s*my\s*product|i\s*wan\s*post\s*product|upload\s*my\s*product|upload\s*item|post\s*my\s*goods|upload\s*my\s*goods)$/i.test(cleanLower);
@@ -8578,11 +8598,21 @@ export async function handleVendorAddProductWizard(params: {
       const mimeType = imageMimeType || media.mimeType || 'image/jpeg';
       const safePhone = cleanPhone.replace(/\D/g, '') || 'merchant';
       const extension = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg';
-      const savedMedia = await saveCatalogMedia(
-        media.buffer,
-        mimeType,
-        `vendor_${safePhone}_${Date.now()}.${extension}`
-      );
+      let savedMedia: Awaited<ReturnType<typeof saveCatalogMedia>>;
+      try {
+        savedMedia = await saveCatalogMedia(
+          media.buffer,
+          mimeType,
+          `vendor_${safePhone}_${Date.now()}.${extension}`
+        );
+      } catch (error) {
+        console.error(`[WhatsApp Product Image Upload Error] +${safePhone}:`, error);
+        await sendWhatsAppMessage(
+          cleanPhone,
+          `⚠️ I couldn't save that product photo. Your listing draft is still open; please resend the photo or reply "Skip" to continue without one.`
+        );
+        return true;
+      }
       photoUrl = savedMedia.publicUrl;
       photoMediaId = savedMedia.mediaId;
     } else if (text.startsWith('http')) {
@@ -8763,7 +8793,7 @@ export async function handleVendorAddProductWizard(params: {
       `💰 *Regular Price:* ${draft.price}\n` +
       (discountFormatted ? `🏷️ *Promo Discount:* ${discountFormatted} *(SAVE ₦${((draft.numericPrice || 0) - (numDiscount || 0)).toLocaleString()})*\n` : '') +
       `📝 *Description:* ${draft.description}\n` +
-      `📸 *Product Photo:* Attached & Saved\n` +
+      `📸 *Product Photo:* ${draft.photoUrl ? 'Attached & Saved' : 'Not added'}\n` +
       `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `Tap **Publish Product** to push this live to your WhatsApp Merchant Hub and www.floate.xyz storefront!`;
 
@@ -8809,9 +8839,36 @@ export async function handleVendorAddProductWizard(params: {
         updatedAt: new Date().toISOString(),
       };
 
-      const savedProduct = await firestoreDb.saveProductListing(prodDoc as any);
+      let savedProduct: Awaited<ReturnType<typeof firestoreDb.saveProductListing>>;
+      try {
+        savedProduct = await firestoreDb.saveProductListing({
+          ...prodDoc,
+          productId: draft.productId,
+        });
+      } catch (error) {
+        console.error(`[WhatsApp Product Publish Error] +${cleanPhone}:`, error);
+        const message = error instanceof Error ? error.message : '';
+        const limitMatch = message.match(/^PRODUCT_LIMIT_REACHED:(\d+)$/);
+        await sendWhatsAppMessage(
+          cleanPhone,
+          limitMatch
+            ? `You have reached your current limit of ${limitMatch[1]} product listings. Please update or remove an existing listing before adding another.`
+            : `⚠️ I couldn't publish this product right now. Your photo and details are still saved in this chat. Reply *Publish Product* to retry, or *Cancel* to discard it.`,
+          {
+            quickReplies: [
+              { id: 'btn_confirm_add_product', title: '🚀 Retry Publish' },
+              { id: 'btn_cancel_add_product', title: '❌ Cancel' },
+            ],
+          }
+        );
+        return true;
+      }
 
-      await sheetsDb.syncListingsFromFirestore(true);
+      try {
+        await sheetsDb.syncListingsFromFirestore(true);
+      } catch (error) {
+        console.warn(`[WhatsApp Product Sync Warning] +${cleanPhone}:`, error);
+      }
 
       // Reset state
       updateWhatsAppSession(cleanPhone, { state: 'IDLE', vendorAddDraft: undefined });
@@ -8824,7 +8881,7 @@ export async function handleVendorAddProductWizard(params: {
         `━━━━━━━━━━━━━━━━━━━━━━\n` +
         `📦 *Product:* **${draft.productName}**\n` +
         `💰 *Price:* ${draft.price}${draft.discountPrice ? ` *(Promo: ${draft.discountPrice})*` : ''}\n` +
-        `📸 *Media:* Photo & Description Published\n\n` +
+        `📸 *Product Photo:* ${draft.photoUrl ? 'Published' : 'Not added'}\n\n` +
         `✅ **Updated in WhatsApp Merchant Hub**\n` +
         `🌐 **Direct Product Page:**\n` +
         `🔗 ${productLink}\n\n` +
@@ -9399,7 +9456,11 @@ async function handleVendorMyStore(cleanPhone: string, senderName: string): Prom
 /**
  * 5b. Add New Product / Service Flow (Web Storefront Link)
  */
-async function startVendorAddProduct(toPhone: string, senderName: string): Promise<void> {
+async function startVendorAddProduct(
+  toPhone: string,
+  senderName: string,
+  initialImage?: { imageId: string; imageMimeType?: string; text?: string }
+): Promise<void> {
   const cleanPhone = toPhone.replace(/\D/g, '');
   const canonicalPhone = cleanPhone.startsWith('0') ? `234${cleanPhone.slice(1)}` : cleanPhone;
   const merchant = (await firestoreDb.getMerchant(canonicalPhone)) || sheetsDb.getListingByPhone(canonicalPhone);
@@ -9413,31 +9474,38 @@ async function startVendorAddProduct(toPhone: string, senderName: string): Promi
     return;
   }
 
-  const addProductUrl = await createMerchantDashboardActionUrl(canonicalPhone, merchant, 'add-product');
-
+  const productId = `prod-wa-${canonicalPhone}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const addMsg =
-    `🛍️ *Add Products to Your Storefront* 📦\n` +
+    `🛍️ *Add a Product on WhatsApp* 📦\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `Hello ${bizName ? `*${bizName}*` : 'Store Owner'}!\n\n` +
-    `Add products from your signed-in Merchant Dashboard.\n\n` +
-    `📸 *What you can do on your storefront:*\n` +
-    `• Snap & upload high-resolution product photos\n` +
-    `• Set your price and promotional deals in Naira\n` +
-    `• Add specifications, sizes, and colors\n` +
-    `• Products publish live immediately to floate.xyz and WhatsApp buyers!\n\n` +
-    `👉 *Open your Merchant Dashboard to add a product:*\n${addProductUrl}\n\n` +
-    `_Once added, your item will be matched whenever buyers search for it on WhatsApp._`;
+    `Send one clear photo of the product you want to list. I’ll then ask for its name, price, description, and any discount, and show you a preview before publishing.\n\n` +
+    `Your confirmed product and photo will appear in your FLOATE catalog and storefront.`;
 
   updateWhatsAppSession(cleanPhone, {
-    state: 'VENDOR_ADD_PRODUCT_LINK_SENT',
-    vendorAddDraft: undefined,
+    state: 'VENDOR_ADD_PRODUCT',
+    vendorAddDraft: {
+      step: 'STEP_1_PHOTO',
+      productId,
+      updatedAt: new Date().toISOString(),
+    },
     pendingCatalogProduct: undefined,
   });
 
+  if (initialImage) {
+    await handleVendorAddProductWizard({
+      cleanPhone,
+      senderName,
+      text: initialImage.text || '',
+      imageId: initialImage.imageId,
+      imageMimeType: initialImage.imageMimeType,
+    });
+    return;
+  }
+
   await sendWhatsAppMessage(cleanPhone, addMsg, {
     quickReplies: [
-      { id: 'btn_open_storefront', title: '🌐 Open Store' },
-      { id: 'btn_vendor_stats', title: '📊 My Stats' },
+      { id: 'btn_cancel_add_product', title: '❌ Cancel' },
       { id: 'btn_for_businesses', title: '🏪 Business Hub' },
     ],
   });

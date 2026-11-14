@@ -267,7 +267,7 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   };
 
   const handleGalleryFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.currentTarget.files || []);
+    const files = Array.from<File>(e.currentTarget.files || []);
     e.currentTarget.value = "";
     if (!files.length) return;
 
