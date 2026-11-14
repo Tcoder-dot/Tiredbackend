@@ -85,6 +85,132 @@ function isCloudinaryImageUrl(value: unknown): boolean {
     return false;
   }
 }
+
+const PRODUCT_IMAGE_FIELDS = [
+  { name: "photos", maxCount: 4 },
+  { name: "image_0", maxCount: 1 },
+  { name: "image_1", maxCount: 1 },
+  { name: "image_2", maxCount: 1 },
+  { name: "image_3", maxCount: 1 },
+];
+const productImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 4 },
+}).fields(PRODUCT_IMAGE_FIELDS);
+
+class ProductImageInputError extends Error {}
+
+function parseProductPhotoUrls(value: unknown, fieldName: string): string[] {
+  if (value === undefined || value === null || value === "") return [];
+  let entries: unknown = value;
+  if (typeof value === "string") {
+    try {
+      entries = JSON.parse(value);
+    } catch {
+      throw new ProductImageInputError(`${fieldName} must be a JSON array of Cloudinary image URLs.`);
+    }
+  }
+  if (!Array.isArray(entries) || entries.length > 4) {
+    throw new ProductImageInputError(`${fieldName} must contain no more than 4 image URLs.`);
+  }
+  const urls = entries.map((entry) => String(entry || "").trim());
+  if (urls.some((url) => !isCloudinaryImageUrl(url))) {
+    throw new ProductImageInputError("Product images must be uploaded to Cloudinary before saving.");
+  }
+  return urls;
+}
+
+function parseRemovedPhotoIndices(value: unknown): Set<number> {
+  if (value === undefined || value === null || value === "") return new Set();
+  let entries: unknown = value;
+  if (typeof value === "string") {
+    try {
+      entries = JSON.parse(value);
+    } catch {
+      throw new ProductImageInputError("removePhotoIndices must be a JSON array of image positions.");
+    }
+  }
+  if (!Array.isArray(entries)) {
+    throw new ProductImageInputError("removePhotoIndices must be an array of image positions.");
+  }
+  const indices = entries.map((entry) => {
+    if (typeof entry !== "number" && (typeof entry !== "string" || !entry.trim())) return Number.NaN;
+    return Number(entry);
+  });
+  if (indices.some((index) => !Number.isInteger(index) || index < 0 || index > 3)) {
+    throw new ProductImageInputError("Image positions must be whole numbers from 0 to 3.");
+  }
+  return new Set(indices);
+}
+
+function isValidProductImage(file: Express.Multer.File): boolean {
+  const { buffer, mimetype } = file;
+  if (mimetype === "image/jpeg") {
+    return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  }
+  if (mimetype === "image/png") {
+    return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  }
+  if (mimetype === "image/webp") {
+    return buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" &&
+      buffer.toString("ascii", 8, 12) === "WEBP";
+  }
+  if (mimetype === "image/heic" || mimetype === "image/heif") {
+    if (buffer.length < 12 || buffer.toString("ascii", 4, 8) !== "ftyp") return false;
+    const brands = [buffer.toString("ascii", 8, 12)];
+    for (let offset = 16; offset + 4 <= Math.min(buffer.length, 64); offset += 4) {
+      brands.push(buffer.toString("ascii", offset, offset + 4));
+    }
+    return brands.some((brand) => ["heic", "heix", "hevc", "hevx", "mif1", "msf1"].includes(brand));
+  }
+  return false;
+}
+
+function getProductImageFiles(req: Request): { photos: Express.Multer.File[]; indexed: Map<number, Express.Multer.File> } {
+  const files = (req.files || {}) as Record<string, Express.Multer.File[]>;
+  const photos = files.photos || [];
+  const indexed = new Map<number, Express.Multer.File>();
+  for (let index = 0; index < 4; index += 1) {
+    const file = files[`image_${index}`]?.[0];
+    if (file) indexed.set(index, file);
+  }
+  if (photos.length > 0 && indexed.size > 0) {
+    throw new ProductImageInputError("Use either the photos field or image_0 through image_3, not both.");
+  }
+  const allFiles = [...photos, ...indexed.values()];
+  if (allFiles.some((file) => !isValidProductImage(file))) {
+    throw new ProductImageInputError("Upload valid JPEG, PNG, WebP, or HEIC product images.");
+  }
+  return { photos, indexed };
+}
+
+async function uploadProductImageFiles(files: Express.Multer.File[]): Promise<string[]> {
+  return Promise.all(files.map((file) => uploadImageToCloudinary(file.buffer, {
+    folder: "floate/products",
+    mimeType: file.mimetype,
+  })));
+}
+
+function productImageUploadMiddleware(req: Request, res: Response, next: express.NextFunction) {
+  productImageUpload(req, res, (error) => {
+    if (!error) return next();
+    const tooLarge = error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE";
+    return res.status(tooLarge ? 413 : 400).json({
+      success: false,
+      error: tooLarge
+        ? "Each product image must be 8 MB or smaller."
+        : "Upload no more than 4 product images using photos or image_0 through image_3.",
+    });
+  });
+}
+
+const requireCatalogMerchantSession: express.RequestHandler = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to manage products." });
+  }
+  next();
+};
+
 app.use(corsMiddleware);
 app.post(
   "/api/webhooks/bachs",
@@ -1475,6 +1601,8 @@ app.get("/api/credentials/:slug/download/certificate", async (req, res) => {
 app.post(
   "/api/catalog/product",
   whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  requireCatalogMerchantSession,
+  productImageUploadMiddleware,
   async (req, res) => {
   const { vendorPhone, identifier, name, title, price, description, category, imageUrl, image } = req.body;
   const prodName = String(name || title || "").trim();
@@ -1505,6 +1633,39 @@ app.post(
     return res.status(400).json({ success: false, error: "A product name, valid merchant WhatsApp number, and positive price are required." });
   }
 
+  let photos: string[];
+  try {
+    const uploaded = getProductImageFiles(req);
+    if ((uploaded.photos.length > 0 || uploaded.indexed.size > 0) && req.body.photos !== undefined) {
+      throw new ProductImageInputError("Do not mix uploaded photos with a photos URL array.");
+    }
+    if (uploaded.photos.length > 0) {
+      photos = await uploadProductImageFiles(uploaded.photos);
+    } else if (uploaded.indexed.size > 0) {
+      const indices = [...uploaded.indexed.keys()].sort((a, b) => a - b);
+      if (indices.some((index, position) => index !== position)) {
+        throw new ProductImageInputError("For a new product, image fields must start at image_0 and be consecutive.");
+      }
+      const indexedFiles = [...uploaded.indexed.entries()].sort(([a], [b]) => a - b).map(([, file]) => file);
+      photos = await uploadProductImageFiles(indexedFiles);
+    } else if (req.body.photos !== undefined) {
+      photos = parseProductPhotoUrls(req.body.photos, "photos");
+    } else {
+      const legacyPhoto = String(imageUrl || image || req.body.photo_url || "").trim();
+      photos = legacyPhoto ? parseProductPhotoUrls([legacyPhoto], "photo") : [];
+    }
+  } catch (error) {
+    const invalidInput = error instanceof ProductImageInputError;
+    console.error("[Catalog] Product image upload failed:", error);
+    return res.status(invalidInput ? 400 : 502).json({
+      success: false,
+      error: invalidInput
+        ? error.message
+        : "Product images could not be uploaded to Cloudinary.",
+    });
+  }
+  const primaryPhotoUrl = photos[0] || "";
+
   if (REMOTE_BACKEND) {
     try {
       const remoteRes = await fetch(`${REMOTE_BACKEND}/api/catalog/product`, {
@@ -1515,7 +1676,14 @@ app.post(
           Authorization: req.get("authorization") || "",
           "x-api-key": FLOATE_API_KEY
         },
-        body: JSON.stringify({ ...req.body, portfolioUrl, portfolioPreviewImageUrl })
+        body: JSON.stringify({
+          ...req.body,
+          photos,
+          photo_url: primaryPhotoUrl,
+          imageUrl: primaryPhotoUrl,
+          portfolioUrl,
+          portfolioPreviewImageUrl,
+        })
       });
       if (remoteRes.ok) {
         const data = await remoteRes.json();
@@ -1565,10 +1733,6 @@ app.post(
     const merchantSlug = createMerchantSlug(businessName) || merchant.slug || merchantDoc.id;
     const merchantCity = merchant.city || "Lagos";
     const merchantState = merchant.state || "Nigeria";
-    const productImage = imageUrl || image || "";
-    if (productImage && !isCloudinaryImageUrl(productImage)) {
-      return res.status(400).json({ success: false, error: "Upload the product image to Cloudinary before saving." });
-    }
     const acceptedConditions = ["new", "used", "refurbished"] as const;
     const submittedCondition = typeof req.body.condition === "string"
       ? req.body.condition.trim().toLowerCase()
@@ -1582,9 +1746,9 @@ app.post(
       price: numPrice,
       numericPrice: numPrice,
       formatted_price: `₦${numPrice.toLocaleString()}`,
-      photo_url: productImage,
-      imageUrl: productImage,
-      photos: productImage ? [productImage] : [],
+      photo_url: primaryPhotoUrl,
+      imageUrl: primaryPhotoUrl,
+      photos,
       portfolioUrl,
       portfolioPreviewImageUrl,
       description: description || `${prodName} in stock at ${businessName}.`,
@@ -1635,40 +1799,20 @@ app.post(
   }
 });
 
-app.patch(
-  "/api/catalog/product/:id",
-  sessionCookieMiddleware,
-  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
-  async (req, res) => {
+const updateCatalogProduct: express.RequestHandler = async (req, res) => {
     if (!req.user) {
       return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to update products." });
     }
 
     const productId = String(req.params.id || "").trim();
-    const authenticatedPhone = normalizeWhatsAppNumber(req.user.phone || req.user.id || req.user.vendorId);
-    const name = String(req.body.name || req.body.title || req.body.product || "").trim();
-    const price = typeof req.body.price === "number"
-      ? req.body.price
-      : parseFloat(String(req.body.price || "0").replace(/[^0-9.]/g, ""));
+    const authenticatedPhone = normalizeWhatsAppNumber(req.user.phone || req.user.id || req.user.sub || req.user.vendorId);
     const acceptedConditions = ["new", "used", "refurbished"] as const;
     const submittedCondition = typeof req.body.condition === "string"
       ? req.body.condition.trim().toLowerCase()
       : "";
     const condition = acceptedConditions.find((value) => value === submittedCondition);
-    if (!productId || !authenticatedPhone || !name || !Number.isFinite(price) || price <= 0) {
-      return res.status(400).json({ success: false, error: "A product name, valid price, and authenticated merchant are required." });
-    }
-
-    let portfolioUrl = "";
-    let portfolioPreviewImageUrl = "";
-    try {
-      portfolioUrl = normalizePortfolioUrl(req.body.portfolioUrl);
-      portfolioPreviewImageUrl = normalizePortfolioUrl(req.body.portfolioPreviewImageUrl);
-    } catch (error) {
-      return res.status(400).json({
-        success: false,
-        error: error instanceof Error ? error.message : "Enter a valid HTTPS portfolio URL."
-      });
+    if (!productId || !authenticatedPhone) {
+      return res.status(400).json({ success: false, error: "An authenticated merchant and product ID are required." });
     }
 
     try {
@@ -1708,9 +1852,96 @@ app.patch(
         return res.status(403).json({ success: false, error: "This product does not belong to the authenticated merchant." });
       }
 
-      const imageUrl = Object.prototype.hasOwnProperty.call(req.body, "imageUrl")
-        ? String(req.body.imageUrl || "")
-        : String(productData.photo_url || productData.imageUrl || "");
+      const name = String(req.body.name || req.body.title || req.body.product || productData.name || productData.title || productData.product || "").trim();
+      const rawPrice = req.body.price === undefined
+        ? productData.numericPrice ?? productData.price_naira ?? productData.price
+        : req.body.price;
+      const price = typeof rawPrice === "number"
+        ? rawPrice
+        : parseFloat(String(rawPrice || "0").replace(/[^0-9.]/g, ""));
+      if (!name || !Number.isFinite(price) || price <= 0) {
+        return res.status(400).json({ success: false, error: "A product name and valid positive price are required." });
+      }
+
+      let portfolioUrl = String(productData.portfolioUrl || "");
+      let portfolioPreviewImageUrl = String(productData.portfolioPreviewImageUrl || "");
+      try {
+        if (Object.prototype.hasOwnProperty.call(req.body, "portfolioUrl")) {
+          portfolioUrl = normalizePortfolioUrl(req.body.portfolioUrl);
+        }
+        if (Object.prototype.hasOwnProperty.call(req.body, "portfolioPreviewImageUrl")) {
+          portfolioPreviewImageUrl = normalizePortfolioUrl(req.body.portfolioPreviewImageUrl);
+        }
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          error: error instanceof Error ? error.message : "Enter a valid HTTPS portfolio URL."
+        });
+      }
+
+      const oldPhotos = Array.isArray(productData.photos) && productData.photos.length > 0
+        ? productData.photos
+        : [productData.photo_url || productData.imageUrl || productData.image || ""].filter(Boolean);
+      let photos: string[];
+      try {
+        const uploaded = getProductImageFiles(req);
+        const hasExistingPhotos = Object.prototype.hasOwnProperty.call(req.body, "existingPhotos");
+        const hasPhotoRemoval = Object.prototype.hasOwnProperty.call(req.body, "removePhotoIndices");
+        if (uploaded.photos.length > 0) {
+          if (req.body.photos !== undefined || hasExistingPhotos || hasPhotoRemoval) {
+            throw new ProductImageInputError("Use the photos upload field alone to replace all product images.");
+          }
+          photos = await uploadProductImageFiles(uploaded.photos);
+        } else if (req.body.photos !== undefined) {
+          if (uploaded.indexed.size > 0 || hasExistingPhotos || hasPhotoRemoval) {
+            throw new ProductImageInputError("Use the photos URL array alone to replace all product images.");
+          }
+          photos = parseProductPhotoUrls(req.body.photos, "photos");
+        } else if (hasExistingPhotos) {
+          photos = parseProductPhotoUrls(req.body.existingPhotos, "existingPhotos");
+          const removed = parseRemovedPhotoIndices(req.body.removePhotoIndices);
+          photos = photos.filter((_photo, index) => !removed.has(index));
+          if (uploaded.indexed.size > 0) {
+            const indexedFiles = [...uploaded.indexed.entries()].sort(([a], [b]) => a - b);
+            for (const [index, file] of indexedFiles) {
+              if (index > photos.length) {
+                throw new ProductImageInputError("Image fields cannot leave gaps in the photo sequence.");
+              }
+              const [url] = await uploadProductImageFiles([file]);
+              if (index === photos.length) photos.push(url);
+              else photos[index] = url;
+            }
+          }
+        } else {
+          const removed = parseRemovedPhotoIndices(req.body.removePhotoIndices);
+          photos = oldPhotos.filter((_photo: unknown, index: number) => !removed.has(index))
+            .map((photo: unknown) => String(photo || "").trim());
+          if (uploaded.indexed.size > 0) {
+            const indexedFiles = [...uploaded.indexed.entries()].sort(([a], [b]) => a - b);
+            for (const [index, file] of indexedFiles) {
+              if (index > photos.length) {
+                throw new ProductImageInputError("Image fields cannot leave gaps in the photo sequence.");
+              }
+              const [url] = await uploadProductImageFiles([file]);
+              if (index === photos.length) photos.push(url);
+              else photos[index] = url;
+            }
+          } else if (Object.prototype.hasOwnProperty.call(req.body, "imageUrl") ||
+                     Object.prototype.hasOwnProperty.call(req.body, "image")) {
+            const imageUrl = String(req.body.imageUrl || req.body.image || "").trim();
+            photos = imageUrl ? parseProductPhotoUrls([imageUrl], "imageUrl") : [];
+          }
+        }
+        if (photos.length > 4) {
+          throw new ProductImageInputError("Product photos must contain no more than 4 images.");
+        }
+      } catch (error) {
+        if (error instanceof ProductImageInputError) {
+          return res.status(400).json({ success: false, error: error.message });
+        }
+        throw error;
+      }
+      const primaryPhotoUrl = photos[0] || "";
       const updatedProduct = {
         ...productData,
         title: name,
@@ -1720,12 +1951,14 @@ app.patch(
         price,
         numericPrice: price,
         formatted_price: `₦${price.toLocaleString()}`,
-        description: String(req.body.description || ""),
-        category: String(req.body.category || "General Merchandise"),
+        description: Object.prototype.hasOwnProperty.call(req.body, "description")
+          ? String(req.body.description || "")
+          : String(productData.description || ""),
+        category: String(req.body.category || productData.category || "General Merchandise"),
         ...(condition ? { condition } : {}),
-        photo_url: imageUrl,
-        imageUrl,
-        photos: imageUrl ? [imageUrl] : [],
+        photo_url: primaryPhotoUrl,
+        imageUrl: primaryPhotoUrl,
+        photos,
         portfolioUrl,
         portfolioPreviewImageUrl
       };
@@ -1744,6 +1977,99 @@ app.patch(
     } catch (error) {
       console.error("[Catalog] Failed to update product:", error);
       return res.status(500).json({ success: false, error: "Product could not be updated." });
+    }
+};
+
+app.put(
+  "/api/catalog/product/:id",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  requireCatalogMerchantSession,
+  productImageUploadMiddleware,
+  updateCatalogProduct
+);
+app.patch(
+  "/api/catalog/product/:id",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  requireCatalogMerchantSession,
+  productImageUploadMiddleware,
+  updateCatalogProduct
+);
+
+app.delete(
+  "/api/catalog/product/:id",
+  sessionCookieMiddleware,
+  whatsappAuthService.expressWhatsAppAuthMiddleware.bind(whatsappAuthService),
+  async (req, res) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, error: "Log in with your business WhatsApp number to delete products." });
+    }
+
+    const productId = String(req.params.id || "").trim();
+    const authenticatedPhone = normalizeWhatsAppNumber(
+      req.user.phone || req.user.id || req.user.sub || req.user.vendorId
+    );
+    if (!productId || !authenticatedPhone) {
+      return res.status(400).json({ success: false, error: "An authenticated merchant and product ID are required." });
+    }
+
+    try {
+      const businesses = await adminFirestoreDb.collection("businesses").get();
+      const merchantDoc = businesses.docs.find((businessDoc) => {
+        const business = businessDoc.data();
+        return normalizeWhatsAppNumber(
+          business.whatsappNumber || business.whatsapp || business.phone || business.whatsapp_number
+        ) === authenticatedPhone;
+      });
+      if (!merchantDoc) {
+        return res.status(404).json({ success: false, error: "No registered merchant matches this WhatsApp session." });
+      }
+
+      const merchant = merchantDoc.data();
+      const isApprovedMerchant = merchant.isVerified === true || merchant.verified === true ||
+        merchant.verificationStatus === "APPROVED" || merchant.status === "ACTIVE";
+      if (!isApprovedMerchant) {
+        return res.status(403).json({ success: false, error: "Only verified merchants can delete catalog products." });
+      }
+
+      const embeddedProducts = Array.isArray(merchant.products) ? merchant.products : [];
+      const embeddedIndex = embeddedProducts.findIndex((product: any) => String(product.id || "") === productId);
+      const productSnapshot = await adminFirestoreDb.collection("products").get();
+      const productDoc = productSnapshot.docs.find((candidate) => {
+        const product = candidate.data();
+        return String(product.id || candidate.id) === productId;
+      });
+      const productData = productDoc?.data() || embeddedProducts[embeddedIndex];
+      if (!productData) {
+        return res.status(404).json({ success: false, error: "Product was not found for this merchant." });
+      }
+
+      const productVendor = productData.vendor && typeof productData.vendor === "object" ? productData.vendor : {};
+      const belongsToMerchant =
+        embeddedIndex >= 0 ||
+        normalizeWhatsAppNumber(
+          productData.vendorPhone || productData.whatsappNumber || productData.whatsapp ||
+          productVendor.whatsapp_number || productVendor.whatsappNumber
+        ) === authenticatedPhone ||
+        String(productData.vendorId || productData.merchantId || "") === merchantDoc.id;
+      if (!belongsToMerchant) {
+        return res.status(403).json({ success: false, error: "This product does not belong to the authenticated merchant." });
+      }
+
+      const batch = adminFirestoreDb.batch();
+      if (productDoc) batch.delete(productDoc.ref);
+      if (embeddedIndex >= 0) {
+        batch.set(merchantDoc.ref, {
+          products: embeddedProducts.filter((_product: any, index: number) => index !== embeddedIndex)
+        }, { merge: true });
+      }
+      await batch.commit();
+      await publishApprovedBusiness(merchantDoc.id);
+      return res.json({ success: true, deleted: true, productId });
+    } catch (error) {
+      console.error("[Catalog] Failed to delete product:", error);
+      return res.status(500).json({ success: false, error: "Product could not be deleted." });
     }
   }
 );

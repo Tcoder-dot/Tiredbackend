@@ -598,6 +598,7 @@ async function getAllMerchants(): Promise<any[]> {
           price_naira: Number(record.numericPrice) || 0,
           formatted_price: String(record.price || ""),
           photo_url: String(record.imageUrl || ""),
+          photos: Array.isArray(record.productImages) ? record.productImages : [record.imageUrl].filter(Boolean),
           description: String(record.description || ""),
           in_stock: record.inStock !== false,
           category: String(record.category || merchant.category)
@@ -624,12 +625,16 @@ export async function getAllProducts(): Promise<any[]> {
       const productId = String(p.id || `prod-${m.slug}-${all.length + 1}`);
       if (productIds.has(productId)) continue;
       productIds.add(productId);
+      const photos = Array.isArray(p.photos) && p.photos.length > 0
+        ? p.photos.map((photo: unknown) => String(photo || "").trim()).filter(Boolean).slice(0, 4)
+        : [p.photo_url || p.photoUrl || p.imageUrl || p.image || ""].filter(Boolean);
       all.push({
         id: productId,
         title: p.title || p.name,
         price_naira: Number(p.price_naira || p.price || 0),
         formatted_price: p.formatted_price || formatPrice(Number(p.price_naira || p.price || 0)),
-        photo_url: p.photo_url || p.photoUrl || p.imageUrl || p.image || "",
+        photo_url: photos[0] || "",
+        photos,
         description: p.description || "",
         in_stock: p.in_stock !== false,
         is_sale: Boolean(p.is_sale),
@@ -674,6 +679,14 @@ export async function getAllProducts(): Promise<any[]> {
       const vendorName = String(
         product.vendorName || product.businessName || product.seller || vendorData.name || ""
       ).trim();
+      const photos = (Array.isArray(product.photos)
+        ? product.photos
+        : Array.isArray(product.productImages)
+        ? product.productImages
+        : [])
+        .map((photo: unknown) => String(photo || "").trim())
+        .filter(Boolean)
+        .slice(0, 4);
       const vendorPhone = normalizeWhatsAppNumber(
         product.vendorPhone || product.whatsappNumber || product.whatsapp || vendorData.whatsapp_number
       );
@@ -688,7 +701,7 @@ export async function getAllProducts(): Promise<any[]> {
 
       const city = String(product.city || vendorData.city || merchant?.city || "Nigeria");
       const state = String(product.state || vendorData.state || merchant?.state || "Nigeria");
-      const photo = product.photo_url || product.photoUrl || product.imageUrl || product.image || product.photo || "";
+      const photo = photos[0] || product.photo_url || product.photoUrl || product.imageUrl || product.image || product.photo || "";
       productIds.add(id);
       all.push({
         id,
@@ -696,7 +709,7 @@ export async function getAllProducts(): Promise<any[]> {
         price_naira: price,
         formatted_price: formatPrice(price),
         photo_url: photo,
-        photos: photo ? [photo] : [],
+        photos: photos.length > 0 ? photos : photo ? [photo] : [],
         description: String(product.description || ""),
         in_stock: product.in_stock !== false,
         is_sale: Boolean(product.is_sale || product.isSale),
@@ -1097,7 +1110,7 @@ router.get("/api/v1/products/:id", async (req: Request, res: Response) => {
       success: true,
       product: {
         ...product,
-        photos: [product.photo_url]
+        photos: product.photos
       }
     });
   } catch (error: any) {

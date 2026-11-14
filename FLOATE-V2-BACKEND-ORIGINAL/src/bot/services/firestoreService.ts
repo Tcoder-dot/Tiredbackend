@@ -378,6 +378,7 @@ export interface ProductDoc {
   negotiation?: 'Yes' | 'No';
   quantity?: number;
   specs?: string;
+  photos?: string[];
   photoUrl?: string;
   imageUrl?: string;
   condition?: 'new' | 'used' | 'refurbished';

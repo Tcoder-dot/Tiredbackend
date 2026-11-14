@@ -44,9 +44,16 @@ function publicRecord(
   const profileImageUrl = cloudinaryUrl(
     business.profileImageUrl || business.profilePhotoUrl || business.avatarUrl || business.avatar_url
   );
+  const productPhotos = (Array.isArray(product?.photos)
+    ? product.photos
+    : Array.isArray(product?.productImages)
+    ? product.productImages
+    : [])
+    .map(cloudinaryUrl)
+    .filter(Boolean)
+    .slice(0, 4);
   const imageUrl = cloudinaryUrl(
-    product?.photo_url || product?.photoUrl || product?.imageUrl || product?.image ||
-    (Array.isArray(product?.productImages) ? product.productImages[0] : "")
+    productPhotos[0] || product?.photo_url || product?.photoUrl || product?.imageUrl || product?.image
   );
   const rawNumericPrice = product?.numericPrice || product?.price_naira || product?.price || business.price || 0;
   const numericPrice = Number(String(rawNumericPrice).replace(/[^0-9.]/g, ""));
@@ -76,7 +83,7 @@ function publicRecord(
     whatsappNumber: String(product?.whatsappNumber || product?.vendorPhone || business.whatsappNumber || business.whatsapp || business.phone || ""),
     profileImageUrl,
     imageUrl,
-    productImages: imageUrl ? [imageUrl] : [],
+    productImages: productPhotos.length > 0 ? productPhotos : imageUrl ? [imageUrl] : [],
     isPublished: true,
     isVerified: true,
     verified: true,

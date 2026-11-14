@@ -21,7 +21,13 @@ export async function uploadImageToCloudinary(
   const signature = createHash("sha1")
     .update(`folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${apiSecret}`)
     .digest("hex");
-  const extension = mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
+  const extension = mimeType === "image/png"
+    ? "png"
+    : mimeType === "image/webp"
+    ? "webp"
+    : mimeType === "image/heic" || mimeType === "image/heif"
+    ? "heic"
+    : "jpg";
   const form = new FormData();
   form.append("file", new Blob([Uint8Array.from(buffer)], { type: mimeType }), `${publicId}.${extension}`);
   form.append("api_key", apiKey);
