@@ -1138,57 +1138,86 @@ app.post("/api/buyer/inquire", async (req, res) => {
 const normalizeRegistrationName = (name: unknown): string =>
   createMerchantSlug(String(name || ""));
 
-const findRegistrationConflict = async (businessName: string, phone: string) => {
-  const [businesses, merchants] = await Promise.all([
+const findRegistrationConflict = async (businessName: string, ownerName: string, phone: string) => {
+  const requestedName = normalizeRegistrationName(businessName);
+  const requestedOwnerName = normalizeRegistrationName(ownerName);
+  const [businesses, merchants, applications, ownerNameKey] = await Promise.all([
     adminFirestoreDb.collection("businesses").get(),
     adminFirestoreDb.collection("merchants").get(),
+    adminFirestoreDb.collection("business_verification_applications").get(),
+    adminFirestoreDb.collection("business_registration_keys").doc(`owner_${requestedOwnerName}`).get(),
   ]);
-  const requestedName = normalizeRegistrationName(businessName);
   let nameExists = false;
+  let ownerNameExists = ownerNameKey.exists;
   let phoneExists = false;
-  let sameBusinessAndPhone = false;
 
-  for (const snapshot of [businesses, merchants]) {
+  for (const snapshot of [businesses, merchants, applications]) {
     for (const merchantDoc of snapshot.docs) {
       const merchant = merchantDoc.data();
-      const existingName = normalizeRegistrationName(merchant.businessName || merchant.name);
+      const existingName = normalizeRegistrationName(merchant.businessName || merchant.business_name || merchant.name);
+      const existingOwnerName = normalizeRegistrationName(
+        merchant.ownerName ||
+        merchant.ownerFullName ||
+        merchant.owner_name ||
+        merchant.registration_data?.ownerName
+      );
       const existingPhones = [
         merchant.whatsappNumber,
         merchant.whatsapp,
         merchant.whatsapp_number,
         merchant.phone,
+        merchant.registration_data?.phone,
       ].map(normalizeWhatsAppNumber).filter(Boolean);
 
       if (existingName && existingName === requestedName) nameExists = true;
+      if (existingOwnerName && existingOwnerName === requestedOwnerName) ownerNameExists = true;
       if (existingPhones.includes(phone)) phoneExists = true;
-      if (existingName && existingName === requestedName && existingPhones.includes(phone)) {
-        sameBusinessAndPhone = true;
-      }
     }
   }
 
-  return { nameExists, phoneExists, sameBusinessAndPhone };
+  return { nameExists, ownerNameExists, phoneExists };
+};
+
+const getRegistrationConflictMessage = (conflict: {
+  nameExists: boolean;
+  ownerNameExists: boolean;
+  phoneExists: boolean;
+}) => {
+  const existingDetails = [
+    conflict.nameExists ? "business name" : "",
+    conflict.ownerNameExists ? "owner name" : "",
+    conflict.phoneExists ? "WhatsApp number" : "",
+  ].filter(Boolean);
+  const details = existingDetails.length > 1
+    ? `${existingDetails.slice(0, -1).join(", ")} and ${existingDetails[existingDetails.length - 1]}`
+    : existingDetails[0];
+  return existingDetails.length
+    ? `The ${details} ${existingDetails.length === 1 ? "is" : "are"} already registered. Please use unique registration details.`
+    : "The business name, owner name, and WhatsApp number are available.";
 };
 
 app.post("/api/register/business/check", async (req, res) => {
   const businessName = String(req.body?.businessName || "").trim();
+  const ownerName = String(req.body?.ownerName || "").trim();
   const phone = normalizeWhatsAppNumber(req.body?.phone);
-  if (!businessName || !phone) {
-    return res.status(400).json({ success: false, error: "Enter a business name and valid WhatsApp number to check." });
+  if (!businessName || !ownerName || !phone) {
+    return res.status(400).json({ success: false, error: "Enter a business name, owner name, and valid WhatsApp number to check." });
   }
 
   try {
-    const conflict = await findRegistrationConflict(businessName, phone);
+    const conflict = await findRegistrationConflict(businessName, ownerName, phone);
+    const duplicate = conflict.nameExists || conflict.ownerNameExists || conflict.phoneExists;
     return res.json({
       success: true,
-      duplicate: conflict.sameBusinessAndPhone,
-      code: conflict.sameBusinessAndPhone ? "BUSINESS_AND_PHONE_EXISTS" : undefined,
-      message: conflict.sameBusinessAndPhone
-        ? "A business with this name and WhatsApp number already exists."
-        : "This business name and WhatsApp number are available.",
+      duplicate,
+      businessNameExists: conflict.nameExists,
+      ownerNameExists: conflict.ownerNameExists,
+      phoneExists: conflict.phoneExists,
+      code: duplicate ? "REGISTRATION_DETAILS_EXISTS" : undefined,
+      message: getRegistrationConflictMessage(conflict),
     });
   } catch (error) {
-    console.error("[Registration] Could not check business name and WhatsApp number:", error);
+    console.error("[Registration] Could not check business, owner, and WhatsApp availability:", error);
     return res.status(503).json({ success: false, error: "Could not check these registration details right now. Please try again." });
   }
 });
@@ -1218,9 +1247,10 @@ app.post("/api/register/business", async (req, res) => {
   const photo = profileImageUrl || selfieUrl || profilePhoto || "";
   const initialProductImage = String(initialProduct?.image || "");
   const merchantSlug = normalizeRegistrationName(businessName);
+  const ownerNameSlug = normalizeRegistrationName(ownerName);
 
-  if (!merchantSlug || !normalizeWhatsAppNumber(phone)) {
-    return res.status(400).json({ success: false, error: "Enter a valid business name and WhatsApp number." });
+  if (!merchantSlug || !ownerNameSlug || !normalizeWhatsAppNumber(phone)) {
+    return res.status(400).json({ success: false, error: "Enter a valid business name, owner name, and WhatsApp number." });
   }
   try {
     const profileImage = new URL(String(photo || ""));
@@ -1247,22 +1277,20 @@ app.post("/api/register/business", async (req, res) => {
   }
 
   try {
-    const conflict = await findRegistrationConflict(String(businessName), intlPhone);
-    if (conflict.nameExists || conflict.phoneExists) {
-      const message = conflict.nameExists && conflict.phoneExists
-        ? "A business with this name and WhatsApp number already exists."
-        : conflict.nameExists
-          ? "A business with this name already exists. Please choose another business name."
-          : "This WhatsApp number is already registered to a business.";
+    const conflict = await findRegistrationConflict(String(businessName), String(ownerName), intlPhone);
+    if (conflict.nameExists || conflict.ownerNameExists || conflict.phoneExists) {
       return res.status(409).json({
         success: false,
-        code: conflict.nameExists && conflict.phoneExists ? "BUSINESS_AND_PHONE_EXISTS" : conflict.nameExists ? "BUSINESS_NAME_EXISTS" : "PHONE_EXISTS",
-        error: message,
+        code: "REGISTRATION_DETAILS_EXISTS",
+        businessNameExists: conflict.nameExists,
+        ownerNameExists: conflict.ownerNameExists,
+        phoneExists: conflict.phoneExists,
+        error: getRegistrationConflictMessage(conflict),
       });
     }
   } catch (error) {
-    console.error("[Registration] Could not verify business name and phone uniqueness:", error);
-    return res.status(503).json({ success: false, error: "Registration could not verify the business name and WhatsApp number. Please try again." });
+    console.error("[Registration] Could not verify business, owner, and phone uniqueness:", error);
+    return res.status(503).json({ success: false, error: "Registration could not verify the business name, owner name, and WhatsApp number. Please try again." });
   }
 
   if (REMOTE_BACKEND) {
@@ -1404,26 +1432,30 @@ app.post("/api/register/business", async (req, res) => {
     };
 
     const registrationNameKey = adminFirestoreDb.collection("business_registration_keys").doc(`name_${merchantSlug}`);
+    const registrationOwnerNameKey = adminFirestoreDb.collection("business_registration_keys").doc(`owner_${ownerNameSlug}`);
     const registrationPhoneKey = adminFirestoreDb.collection("business_registration_keys").doc(`phone_${intlPhone}`);
     const businessRef = adminFirestoreDb.collection("businesses").doc(docId);
     const productRef = initialProductList[0]
       ? adminFirestoreDb.collection("products").doc(initialProductList[0].id)
       : null;
     const registrationResult = await adminFirestoreDb.runTransaction(async (transaction) => {
-      const [nameKeySnapshot, phoneKeySnapshot, businessSnapshot] = await Promise.all([
+      const [nameKeySnapshot, ownerNameKeySnapshot, phoneKeySnapshot, businessSnapshot] = await Promise.all([
         transaction.get(registrationNameKey),
+        transaction.get(registrationOwnerNameKey),
         transaction.get(registrationPhoneKey),
         transaction.get(businessRef),
       ]);
-      if (nameKeySnapshot.exists || phoneKeySnapshot.exists || businessSnapshot.exists) {
+      if (nameKeySnapshot.exists || ownerNameKeySnapshot.exists || phoneKeySnapshot.exists || businessSnapshot.exists) {
         return {
           conflict: true,
           nameExists: nameKeySnapshot.exists,
+          ownerNameExists: ownerNameKeySnapshot.exists,
           phoneExists: phoneKeySnapshot.exists || businessSnapshot.exists,
         };
       }
 
       transaction.set(registrationNameKey, { businessName, phone: intlPhone, createdAt });
+      transaction.set(registrationOwnerNameKey, { ownerName, phone: intlPhone, createdAt });
       transaction.set(registrationPhoneKey, { businessName, phone: intlPhone, createdAt });
       transaction.create(businessRef, businessData);
       if (productRef && initialProductList[0]) {
@@ -1438,18 +1470,16 @@ app.post("/api/register/business", async (req, res) => {
           createdAt,
         }, { merge: true });
       }
-      return { conflict: false, nameExists: false, phoneExists: false };
+      return { conflict: false, nameExists: false, ownerNameExists: false, phoneExists: false };
     });
     if (registrationResult.conflict) {
-      const message = registrationResult.nameExists && registrationResult.phoneExists
-        ? "A business with this name and WhatsApp number already exists."
-        : registrationResult.nameExists
-          ? "A business with this name already exists. Please choose another business name."
-          : "This WhatsApp number is already registered to a business.";
       return res.status(409).json({
         success: false,
-        code: registrationResult.nameExists && registrationResult.phoneExists ? "BUSINESS_AND_PHONE_EXISTS" : registrationResult.nameExists ? "BUSINESS_NAME_EXISTS" : "PHONE_EXISTS",
-        error: message,
+        code: "REGISTRATION_DETAILS_EXISTS",
+        businessNameExists: registrationResult.nameExists,
+        ownerNameExists: registrationResult.ownerNameExists,
+        phoneExists: registrationResult.phoneExists,
+        error: getRegistrationConflictMessage(registrationResult),
       });
     }
 

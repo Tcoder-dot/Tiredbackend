@@ -196,6 +196,14 @@ export interface RegisterBusinessResponse {
   isVerified?: boolean;
 }
 
+export interface BusinessRegistrationCheckResponse {
+  duplicate: boolean;
+  businessNameExists: boolean;
+  ownerNameExists: boolean;
+  phoneExists: boolean;
+  message: string;
+}
+
 /**
  * 1. Register Business Form API
  * POST ${NEXT_PUBLIC_FLOATE_API_URL}/api/register/business
@@ -336,6 +344,28 @@ async function postWhatsAppAuth(path: string, payload: Record<string, string>) {
     throw new Error(data.error || data.message || `WhatsApp verification failed (${response.status})`);
   }
   return data;
+}
+
+export async function checkBusinessRegistration(
+  businessName: string,
+  ownerName: string,
+  phone: string
+): Promise<BusinessRegistrationCheckResponse> {
+  const response = await postWhatsAppAuth("/api/register/business/check", {
+    businessName: businessName.trim(),
+    ownerName: ownerName.trim(),
+    phone: sanitizeIntlPhone(phone)
+  });
+  if (typeof response.duplicate !== "boolean") {
+    throw new Error("Business availability check returned an invalid response.");
+  }
+  return {
+    duplicate: response.duplicate,
+    businessNameExists: response.businessNameExists === true,
+    ownerNameExists: response.ownerNameExists === true,
+    phoneExists: response.phoneExists === true,
+    message: typeof response.message === "string" ? response.message : "Registration details checked."
+  };
 }
 
 export async function sendRegistrationOtp(phone: string): Promise<void> {

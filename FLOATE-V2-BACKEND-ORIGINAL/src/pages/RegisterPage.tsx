@@ -27,8 +27,9 @@ import {
   Layers,
   Check
 } from "lucide-react";
-import { registerBusiness, sendRegistrationOtp, verifyRegistrationOtp } from "../services/floateApi";
+import { checkBusinessRegistration, registerBusiness, sendRegistrationOtp, verifyRegistrationOtp } from "../services/floateApi";
 import { NIGERIAN_STATES } from "../data/nigeriaConstants";
+import { createMerchantSlug } from "../utils/merchantSlug";
 
 interface RegisterPageProps {
   onBackToHome: () => void;
@@ -125,6 +126,73 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
   const [errorMsg, setErrorMsg] = useState("");
   const [registrationSuccess, setRegistrationSuccess] = useState<any | null>(null);
   const [countdown, setCountdown] = useState(4);
+  const [businessCheckStatus, setBusinessCheckStatus] = useState<"idle" | "checking" | "available" | "duplicate" | "unavailable">("idle");
+  const [businessCheckKey, setBusinessCheckKey] = useState("");
+  const [businessCheckConflict, setBusinessCheckConflict] = useState({
+    businessNameExists: false,
+    ownerNameExists: false,
+    phoneExists: false
+  });
+  const [businessCheckMessage, setBusinessCheckMessage] = useState("");
+  const [businessCheckAttempt, setBusinessCheckAttempt] = useState(0);
+
+  const normalizedRegistrationPhone = phone.replace(/[^0-9]/g, "");
+  const registrationCheckKey = `${createMerchantSlug(businessName)}:${createMerchantSlug(ownerName)}:${normalizedRegistrationPhone}`;
+  const currentBusinessCheckStatus = businessCheckKey === registrationCheckKey
+    ? businessCheckStatus
+    : businessName.trim() && ownerName.trim() && normalizedRegistrationPhone.length >= 10
+      ? "checking"
+      : "idle";
+
+  useEffect(() => {
+    const businessSlug = createMerchantSlug(businessName);
+    const ownerSlug = createMerchantSlug(ownerName);
+    if (currentStep !== 1 || !businessSlug || !ownerSlug || normalizedRegistrationPhone.length < 10) {
+      setBusinessCheckStatus("idle");
+      setBusinessCheckKey("");
+      setBusinessCheckConflict({
+        businessNameExists: false,
+        ownerNameExists: false,
+        phoneExists: false
+      });
+      setBusinessCheckMessage("");
+      return;
+    }
+
+    let active = true;
+    const key = `${businessSlug}:${ownerSlug}:${normalizedRegistrationPhone}`;
+    setBusinessCheckStatus("checking");
+    setBusinessCheckKey(key);
+    setBusinessCheckConflict({
+      businessNameExists: false,
+      ownerNameExists: false,
+      phoneExists: false
+    });
+    setBusinessCheckMessage("");
+    const timeout = window.setTimeout(() => {
+      checkBusinessRegistration(businessName, ownerName, phone)
+        .then((result) => {
+          if (!active) return;
+          setBusinessCheckStatus(result.duplicate ? "duplicate" : "available");
+          setBusinessCheckConflict({
+            businessNameExists: result.businessNameExists,
+            ownerNameExists: result.ownerNameExists,
+            phoneExists: result.phoneExists
+          });
+          setBusinessCheckMessage(result.message);
+        })
+        .catch((error: unknown) => {
+          if (!active) return;
+          console.error("[Registration] Could not check business availability:", error);
+          setBusinessCheckStatus("unavailable");
+        });
+    }, 500);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+    };
+  }, [businessName, ownerName, phone, currentStep, normalizedRegistrationPhone, businessCheckAttempt]);
 
   // Pre-fill form fields from URL query parameters (phone, name, biz, cat, loc)
   useEffect(() => {
@@ -331,9 +399,23 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
   // STEP NAVIGATION & VALIDATIONS
   const handleSendOtp = async () => {
     setErrorMsg("");
+    if (!businessName.trim() || !ownerName.trim()) {
+      setErrorMsg("Enter your business name and owner full name so we can check them before sending a code.");
+      return;
+    }
     const cleanDigits = phone.replace(/[^0-9]/g, "");
     if (!cleanDigits || cleanDigits.length < 10) {
       setErrorMsg("Please enter a valid WhatsApp phone number before requesting a code.");
+      return;
+    }
+    if (currentBusinessCheckStatus === "duplicate") {
+      setErrorMsg(businessCheckMessage || "One or more registration details are already in use.");
+      return;
+    }
+    if (currentBusinessCheckStatus !== "available") {
+      setErrorMsg(currentBusinessCheckStatus === "unavailable"
+        ? "We could not confirm registration details. Retry the availability check before requesting a code."
+        : "Please wait for the business, owner name, and WhatsApp availability check to finish.");
       return;
     }
 
@@ -352,6 +434,14 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
 
   const handleVerifyPhone = async () => {
     setErrorMsg("");
+    if (currentBusinessCheckStatus === "duplicate") {
+      setErrorMsg(businessCheckMessage || "One or more registration details are already in use.");
+      return;
+    }
+    if (currentBusinessCheckStatus !== "available") {
+      setErrorMsg("Confirm that the business name, owner name, and WhatsApp number are available before verifying.");
+      return;
+    }
     if (otpCode.trim().length !== 4) {
       setErrorMsg("Enter the 4-digit code sent to your WhatsApp.");
       return;
@@ -379,6 +469,16 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
     }
     if (!ownerName.trim()) {
       setErrorMsg("Please enter your full name as the business owner.");
+      return;
+    }
+    if (currentBusinessCheckStatus === "duplicate") {
+      setErrorMsg(businessCheckMessage || "One or more registration details are already in use.");
+      return;
+    }
+    if (currentBusinessCheckStatus !== "available") {
+      setErrorMsg(currentBusinessCheckStatus === "unavailable"
+        ? "We could not confirm registration details. Retry the availability check before continuing."
+        : "Please wait for the business, owner name, and WhatsApp availability check to finish.");
       return;
     }
     if (!state.trim() || !city.trim()) {
@@ -694,6 +794,42 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
                 <p className="text-[11px] text-[#5B6E66]">
                   We will send a one-time code to confirm you control this WhatsApp number.
                 </p>
+                {businessName.trim() && ownerName.trim() && normalizedRegistrationPhone.length >= 10 && currentBusinessCheckStatus !== "idle" && (
+                  <div className="text-xs" aria-live="polite">
+                    {currentBusinessCheckStatus === "checking" && (
+                      <p className="text-slate-600">Checking whether this business name, owner name, and WhatsApp number are available...</p>
+                    )}
+                    {currentBusinessCheckStatus === "available" && (
+                      <p className="font-semibold text-emerald-700">This business name, owner name, and WhatsApp number are available.</p>
+                    )}
+                    {currentBusinessCheckStatus === "duplicate" && (
+                      <div className="flex flex-wrap items-center gap-2 text-red-700">
+                        <span className="font-semibold">{businessCheckMessage || "One or more registration details are already in use."}</span>
+                        {(businessCheckConflict.businessNameExists || businessCheckConflict.phoneExists) && (
+                          <button
+                            type="button"
+                            onClick={() => onNavigateLogin?.()}
+                            className="font-bold underline"
+                          >
+                            Sign in
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {currentBusinessCheckStatus === "unavailable" && (
+                      <div className="flex flex-wrap items-center gap-2 text-amber-800">
+                        <span>We could not verify these details. You must retry the check before continuing.</span>
+                        <button
+                          type="button"
+                          onClick={() => setBusinessCheckAttempt((attempt) => attempt + 1)}
+                          className="font-bold underline"
+                        >
+                          Try again
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {isPhoneVerified ? (
                   <p className="inline-flex items-center gap-1 text-xs font-bold text-emerald-700">
                     <CheckCircle2 className="w-4 h-4" /> WhatsApp number verified
@@ -715,16 +851,16 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
                     <button
                       type="button"
                       onClick={otpSent ? handleVerifyPhone : handleSendOtp}
-                      disabled={isOtpLoading}
+                      disabled={isOtpLoading || currentBusinessCheckStatus !== "available"}
                       className="px-4 py-2.5 rounded-xl bg-[#13241F] text-white text-xs font-bold disabled:opacity-50"
                     >
-                      {isOtpLoading ? "Please wait..." : otpSent ? "Verify number" : "Send WhatsApp code"}
+                      {isOtpLoading ? "Please wait..." : currentBusinessCheckStatus === "checking" ? "Checking details..." : otpSent ? "Verify number" : "Send WhatsApp code"}
                     </button>
                     {otpSent && (
                       <button
                         type="button"
                         onClick={handleSendOtp}
-                        disabled={isOtpLoading}
+                        disabled={isOtpLoading || currentBusinessCheckStatus !== "available"}
                         className="px-3 py-2.5 rounded-xl border border-slate-300 text-xs font-bold disabled:opacity-50"
                       >
                         Resend code
