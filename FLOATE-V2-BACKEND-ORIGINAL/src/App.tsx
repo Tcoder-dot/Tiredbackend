@@ -206,7 +206,7 @@ function AppContent() {
         setRoute({ type: "PUBLIC_VERIFY", fid });
       } else if (pathname.startsWith("/p/")) {
         const productPath = pathname.slice(3).split("/");
-        const id = decodeURIComponent(productPath.length > 1 ? productPath.slice(1).join("/") : productPath[0]);
+        const id = decodeURIComponent(productPath[productPath.length - 1]);
         setRoute({ type: "PRODUCT", id });
       } else if (pathname.startsWith("/hub/") || pathname.startsWith("/solutions/")) {
         const slug = pathname.replace(/^\/(hub|solutions)\//, "");

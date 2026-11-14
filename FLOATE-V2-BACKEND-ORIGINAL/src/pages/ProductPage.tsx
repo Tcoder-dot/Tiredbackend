@@ -56,7 +56,8 @@ export const ProductPage: React.FC<ProductPageProps> = ({
           setProduct(res.product);
           const canonicalPath = buildProductPath(
             res.product.id,
-            createMerchantSlug(res.product.vendor.name) || res.product.vendor.slug
+            createMerchantSlug(res.product.vendor.name) || res.product.vendor.slug,
+            res.product.title
           );
           if (window.location.pathname !== canonicalPath) {
             const currentUrl = new URL(window.location.href);
@@ -108,7 +109,7 @@ export const ProductPage: React.FC<ProductPageProps> = ({
 
   const handleShare = () => {
     const shareUrl = product
-      ? buildProductUrl(product.id, createMerchantSlug(product.vendor.name) || product.vendor.slug)
+      ? buildProductUrl(product.id, createMerchantSlug(product.vendor.name) || product.vendor.slug, product.title)
       : window.location.href;
     if (navigator.share && product) {
       navigator
@@ -186,7 +187,8 @@ export const ProductPage: React.FC<ProductPageProps> = ({
   const currentDisplayPhoto = allPhotos[activePhotoIdx] || allPhotos[0];
   const canonicalUrl = buildProductUrl(
     product.id,
-    createMerchantSlug(product.vendor.name) || product.vendor.slug
+    createMerchantSlug(product.vendor.name) || product.vendor.slug,
+    product.title
   );
   const merchantCanonicalSlug = createMerchantSlug(product.vendor.name) || product.vendor.slug;
   const itemCondition = product.condition?.toLowerCase() === "new"

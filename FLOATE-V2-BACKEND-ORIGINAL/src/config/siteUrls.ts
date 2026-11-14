@@ -91,12 +91,21 @@ export function buildMerchantProfileUrl(
 
 /**
  * Canonical product permalink URL with both merchant and product identity.
- * Generates: https://www.floate.xyz/p/:merchantSlug/:productId
+ * Generates: https://www.floate.xyz/p/:merchantSlug/:productSlug/:productId
  */
-export function buildProductUrl(productId: string, merchantIdentifier: string): string {
+export function buildProductUrl(productId: string, merchantIdentifier: string, productName?: string): string {
   const base = getPublicSiteUrl();
   const merchantSlug = slugifyBusinessName(merchantIdentifier) || merchantIdentifier.trim();
-  return `${base}/p/${encodeURIComponent(merchantSlug)}/${encodeURIComponent(productId)}`;
+  const productSlug = productName
+    ?.toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  const productPath = productSlug
+    ? `/p/${encodeURIComponent(merchantSlug)}/${encodeURIComponent(productSlug)}/${encodeURIComponent(productId)}`
+    : `/p/${encodeURIComponent(merchantSlug)}/${encodeURIComponent(productId)}`;
+  return `${base}${productPath}`;
 }
 
 /**

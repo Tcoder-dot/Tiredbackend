@@ -215,7 +215,7 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   };
 
   const handleShareProduct = async (product: Product) => {
-    const url = buildProductUrl(product.id, vendor?.name || vendor?.slug || merchantSlug);
+    const url = buildProductUrl(product.id, vendor?.name || vendor?.slug || merchantSlug, product.title);
     try {
       if (navigator.share) {
         await navigator.share({ title: product.title, text: `Check out ${product.title} on FLOATE.`, url });

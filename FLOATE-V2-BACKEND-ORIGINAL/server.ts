@@ -14,6 +14,7 @@ import {
   processFlutterwaveStorefrontPayment
 } from "./src/bot/services/storefrontPaymentService.js";
 import { generateSitemapXML, generateRobotsTxt } from "./src/utils/sitemap";
+import { buildProductPath } from "./src/utils/productUrl";
 import searchRouter from "./routes/search";
 import v1Router, {
   consumeRegistrationVerificationToken,
@@ -3252,7 +3253,7 @@ app.get("/sitemap.xml", async (_req, res) => {
       const merchantSlug = merchant
         ? createMerchantSlug(merchant.businessName || merchant.name || "")
         : "";
-      return id && merchantSlug ? [{ id, merchantSlug }] : [];
+      return id && merchantSlug ? [{ id, merchantSlug, productName: String(product.title || product.name) }] : [];
     });
 
     res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
@@ -3309,9 +3310,7 @@ app.get("/merchant-feed.xml", async (_req, res) => {
       if (!id) return [];
       const merchantName = String(product.vendor?.name || product.businessName || "");
       const merchantSlug = createMerchantSlug(merchantName) || String(product.vendor?.slug || "");
-      const productUrl = merchantSlug
-        ? `${origin}/p/${encodeURIComponent(merchantSlug)}/${encodeURIComponent(id)}`
-        : `${origin}/p/${encodeURIComponent(id)}`;
+      const productUrl = `${origin}${buildProductPath(id, merchantSlug || merchantName, title)}`;
       return [`<item>
   <g:id>${xmlEscape(id)}</g:id>
   <g:title>${xmlEscape(title)}</g:title>
@@ -5872,7 +5871,7 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
         const productId = String(product.id || "");
         const productPrice = Number(product.price_naira ?? product.price);
         const link = productId
-          ? `<a href="/p/${encodeURIComponent(canonicalSlug)}/${encodeURIComponent(productId)}">${escapeHtml(productName)}</a>`
+          ? `<a href="${buildProductPath(productId, canonicalSlug, productName)}">${escapeHtml(productName)}</a>`
           : escapeHtml(productName);
         const priceText = Number.isFinite(productPrice) && productPrice > 0
           ? ` — ₦${productPrice.toLocaleString("en-NG")}`
@@ -5896,9 +5895,9 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
     };
   }
 
-  const productMatch = pathValue.match(/^\/p\/([^/]+)(?:\/([^/]+))?$/);
+  const productMatch = pathValue.match(/^\/p\/([^/]+)(?:\/([^/]+))?(?:\/([^/]+))?$/);
   if (productMatch) {
-    const id = decodeURIComponent(productMatch[2] || productMatch[1]);
+    const id = decodeURIComponent(productMatch[3] || productMatch[2] || productMatch[1]);
     const result = await fetchLocalJson(`/api/v1/products/${encodeURIComponent(id)}`);
     const product = result.data?.success ? result.data.product : null;
     if (!product) {
@@ -5938,9 +5937,7 @@ async function resolvePageSeo(requestPath: string): Promise<{ seo: PageSeo; stat
       }
     }
     const sellerGeo = getMerchantGeo(sellerMerchant);
-    const canonical = merchantSlug
-      ? `https://www.floate.xyz/p/${encodeURIComponent(merchantSlug)}/${encodeURIComponent(id)}`
-      : `https://www.floate.xyz/p/${encodeURIComponent(id)}`;
+    const canonical = `https://www.floate.xyz${buildProductPath(id, merchantSlug || merchantName, title)}`;
     const rawImage = Array.isArray(product.photos) ? product.photos[0] : product.photo_url || product.imageUrl;
     const image = isHttpUrl(rawImage)
       ? rawImage

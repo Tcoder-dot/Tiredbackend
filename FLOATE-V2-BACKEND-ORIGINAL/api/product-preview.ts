@@ -61,7 +61,13 @@ export default async function handler(req: any, res: any) {
       queryValue(req.query?.merchant) ||
       merchantName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
     );
-    const canonical = `https://www.floate.xyz/p/${encodeURIComponent(merchantSlug)}/${encodeURIComponent(id)}`;
+    const productSlug = title
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    const canonical = `https://www.floate.xyz/p/${encodeURIComponent(merchantSlug)}/${encodeURIComponent(productSlug)}/${encodeURIComponent(id)}`;
     const description = String(product.description || `${title} from ${merchantName}. View the product and contact the seller on FLOATE.`)
       .trim()
       .slice(0, 300);

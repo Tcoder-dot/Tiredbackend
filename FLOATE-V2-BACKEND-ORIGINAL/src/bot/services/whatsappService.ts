@@ -8790,7 +8790,7 @@ export async function handleVendorAddProductWizard(params: {
       updateWhatsAppSession(cleanPhone, { state: 'IDLE', vendorAddDraft: undefined });
 
       const storeLink = buildMerchantProfileUrl(cleanBizSlug);
-      const productLink = buildProductUrl(savedProduct.id, bizName);
+      const productLink = buildProductUrl(savedProduct.id, bizName, draft.productName);
 
       const publishSuccessMsg =
         `🎉 *PRODUCT PUBLISHED LIVE ON FLOATE!* 🚀\n` +
@@ -9643,7 +9643,7 @@ async function finalizeAndPublishProduct(
   // Check and unlock pending referral reward if this store was referred
   checkAndNotifyReferralUnlock(toPhone, bizName);
 
-  const productPermalink = buildProductUrl(savedProd.id, bizName);
+  const productPermalink = buildProductUrl(savedProd.id, bizName, productData.productName);
   const webStoreUrl = buildMerchantProfileUrl(bizName);
 
   updateWhatsAppSession(toPhone, {
@@ -11969,7 +11969,7 @@ async function handleRegistrationSteps(
         price: item.price,
         negotiation: 'Yes',
       });
-      productLinks.push(buildProductUrl(savedProduct.id, bizName));
+      productLinks.push(buildProductUrl(savedProduct.id, bizName, savedProduct.product));
     } catch (pErr) {
       console.warn('[Firestore Product Save Warning]:', pErr);
     }

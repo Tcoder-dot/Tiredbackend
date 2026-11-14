@@ -196,7 +196,7 @@ export function matchCatalogProducts(
         category: String(rawProduct.category || ''),
         description: String(rawProduct.description || rawProduct.specs || ''),
         imageUrl,
-        productUrl: buildProductUrl(id, vendorSlug),
+        productUrl: buildProductUrl(id, vendorSlug, productName),
         vendorSlug,
         vendorPhone,
         vendor: {

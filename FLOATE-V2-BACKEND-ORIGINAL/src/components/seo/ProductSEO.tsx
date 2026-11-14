@@ -35,7 +35,7 @@ export const ProductSEO: React.FC<ProductSEOProps> = ({
   const pageDescription = description
     ? `${description} — Available for ₦${formattedPrice} from ${vendorName} at ${marketLocation}. Contact the seller directly through FLOATE.`
     : `Buy ${productTitle} for ₦${formattedPrice} from ${vendorName} at ${marketLocation}, Nigeria. View listing details and contact the seller directly through FLOATE.`;
-  const canonicalUrl = buildProductUrl(productSlug, vendorName);
+  const canonicalUrl = buildProductUrl(productSlug, vendorName, productTitle);
   const productSchema = {
     "@context": "https://schema.org",
     "@type": "Product",

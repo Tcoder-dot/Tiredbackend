@@ -5,6 +5,7 @@ export const DOMAIN = 'https://www.floate.xyz';
 export interface SitemapProduct {
   id: string;
   merchantSlug?: string;
+  productName?: string;
 }
 
 function escapeXml(value: string): string {
@@ -42,9 +43,17 @@ export function generateSitemapXML(
     .map((item) => typeof item === 'string' ? { id: item } : item)
     .filter((product) => Boolean(product.id.trim()))
     .map((product) => {
-      const path = product.merchantSlug
-        ? `/p/${encodeURIComponent(product.merchantSlug)}/${encodeURIComponent(product.id.trim())}`
-        : `/p/${encodeURIComponent(product.id.trim())}`;
+      const productSlug = product.productName
+        ?.toLowerCase()
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '');
+      const path = product.merchantSlug && productSlug
+        ? `/p/${encodeURIComponent(product.merchantSlug)}/${encodeURIComponent(productSlug)}/${encodeURIComponent(product.id.trim())}`
+        : product.merchantSlug
+          ? `/p/${encodeURIComponent(product.merchantSlug)}/${encodeURIComponent(product.id.trim())}`
+          : `/p/${encodeURIComponent(product.id.trim())}`;
       return [path, { url: `${DOMAIN}${path}`, priority: '0.8', changefreq: 'daily' }] as const;
     }))
     .values()];
