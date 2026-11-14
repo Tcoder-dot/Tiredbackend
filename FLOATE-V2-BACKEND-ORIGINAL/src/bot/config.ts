@@ -19,6 +19,7 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   port: parseInt(process.env.PORT || '3000', 10),
   // WhatsApp Cloud API (Meta Graph API)
+  whatsappApiVersion: process.env.WHATSAPP_API_VERSION || 'v23.0',
   whatsappAccessToken: process.env.WHATSAPP_ACCESS_TOKEN || '',
   whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
   whatsappVerifyToken: process.env.WHATSAPP_VERIFY_TOKEN || '',

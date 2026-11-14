@@ -364,7 +364,7 @@ export async function sendWhatsAppMessage(
     return true; // Successfully delivered to simulator/debugger
   }
 
-  const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
+  const url = `https://graph.facebook.com/${config.whatsappApiVersion}/${phoneNumberId}/messages`;
   let payload: any;
 
   // 0. Native WhatsApp Flow Interactive Message (Meta Flows API v3)
@@ -692,7 +692,7 @@ export async function sendWhatsAppContactCard(
 
   if (!token || !phoneNumberId) return false;
 
-  const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
+  const url = `https://graph.facebook.com/${config.whatsappApiVersion}/${phoneNumberId}/messages`;
   const botPhone = process.env.WHATSAPP_PHONE_NUMBER || contact?.phone || '2348000000000';
   const cleanBotPhone = botPhone.replace(/\D/g, '');
 
@@ -762,7 +762,7 @@ export async function sendWhatsAppTypingIndicator(messageId: string): Promise<bo
 
   if (!token || !phoneNumberId || !messageId) return false;
 
-  const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
+  const url = `https://graph.facebook.com/${config.whatsappApiVersion}/${phoneNumberId}/messages`;
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -845,7 +845,7 @@ export async function downloadWhatsAppMedia(mediaId: string): Promise<{ buffer: 
   }
 
   try {
-    const metaUrl = `https://graph.facebook.com/v20.0/${mediaId}`;
+    const metaUrl = `https://graph.facebook.com/${config.whatsappApiVersion}/${mediaId}`;
     const metaRes = await fetch(metaUrl, {
       headers: { Authorization: `Bearer ${token}` },
     });
