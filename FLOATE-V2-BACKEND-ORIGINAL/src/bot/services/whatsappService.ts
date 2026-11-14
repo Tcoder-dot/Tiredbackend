@@ -1113,9 +1113,23 @@ export async function handleWhatsAppWebhook(req: express.Request, res: express.R
                 throw new Error('The storefront lead payload is missing merchant details.');
               }
 
+              if (await firestoreDb.isFirstContactForWhatsAppNumber(senderPhone)) {
+                const displayName = senderName && senderName !== 'Customer' && senderName.trim()
+                  ? `${senderName.trim()}, `
+                  : '';
+                await sendWhatsAppMessage(
+                  senderPhone,
+                  `👋 Hi ${displayName}welcome to *FLOATE*! Please save this official number as *Floate* in your contacts so you can use us continuously.\n\n` +
+                  `You can shop as a buyer or register your business. Since you opened a product, I’ll help you contact its seller now. Reply *REGISTER BUSINESS* if you would rather register a store.`
+                );
+                await firestoreDb.recordFirstContact(senderPhone, senderName);
+                updateWhatsAppSession(senderPhone, { hasSeenSaveTip: true });
+              }
+
               await startFloateDirectHandoff(senderPhone, senderName, merchantIdentifier.trim(), {
                 productName: typeof payload.productName === 'string' ? payload.productName.slice(0, 160) : undefined,
                 price: typeof payload.price === 'string' ? payload.price.slice(0, 40) : undefined,
+                buyerMessage: typeof payload.buyerMessage === 'string' ? payload.buyerMessage.slice(0, 500) : undefined,
               });
             } catch (error) {
               console.warn('[Storefront Lead] Invalid lead payload:', error);
@@ -1200,7 +1214,7 @@ export async function startFloateDirectHandoff(
   buyerPhone: string,
   buyerName: string,
   bizId: string,
-  leadContext: { productName?: string; price?: string; deliveryLocation?: string; whenNeeded?: string } = {}
+  leadContext: { productName?: string; price?: string; buyerMessage?: string; deliveryLocation?: string; whenNeeded?: string } = {}
 ) {
   const cleanBuyerPhone = normalizePhone(buyerPhone).replace(/^0/, '234');
   let listing = sheetsDb.getListingById(bizId);
@@ -1298,7 +1312,8 @@ export async function startFloateDirectHandoff(
   // Build 1-on-1 direct WhatsApp chat link with clean pre-filled text
   // If there is no price info, omit price entirely rather than saying "(₦ contact for price)"
   const priceClause = hasValidPrice ? ` (${priceDisplay})` : '';
-  const prefilledInquiry = `Hello ${bizName}, I found your store on Floate for "${item}"${priceClause}. Is this available?`;
+  const prefilledInquiry = leadContext.buyerMessage?.trim() ||
+    `Hello ${bizName}, I found your store on Floate for "${item}"${priceClause}. Is this available?`;
   const waChatLink = `https://wa.me/${vendorPhone}?text=${encodeURIComponent(prefilledInquiry)}`;
   const loc = listing?.city ? listing.city : (listing?.state ? listing.state : '');
 
@@ -5873,6 +5888,18 @@ export async function processMasterWhatsAppEngine(params: {
 
   // 1c. Lead Qualification (Delivery Location & When Needed)
   if (session.state === 'QUALIFYING_LOCATION') {
+    if (
+      isBusinessRegistrationPhrase(text) ||
+      /^(?:role_business|register business|register store)$/i.test(text.trim())
+    ) {
+      updateWhatsAppSession(cleanPhone, {
+        state: 'IDLE',
+        leadQualificationDraft: undefined,
+      });
+      await startConversationalRegistration(cleanPhone, senderName, extractRegistrationHints(text));
+      return;
+    }
+
     updateWhatsAppSession(cleanPhone, {
       state: 'QUALIFYING_NEEDS',
       leadQualificationDraft: {

@@ -121,6 +121,31 @@ test('matches query keywords and enforces a stated budget', () => {
   assert.deepEqual(results.map((product) => product.id), ['s24-under-budget']);
 });
 
+test('prioritizes products in the requested location before stronger out-of-area matches', () => {
+  const results = matchCatalogProducts(
+    [
+      {
+        id: 'exact-match-lagos',
+        product: 'Samsung Galaxy S24',
+        category: 'Phones & Accessories',
+        listingType: 'Product',
+        city: 'Lagos',
+      },
+      {
+        id: 'similar-match-onitsha',
+        product: 'Samsung Galaxy S24 Case',
+        category: 'Phones & Accessories',
+        listingType: 'Product',
+        city: 'Onitsha',
+      },
+    ],
+    'Samsung Galaxy S24',
+    'Onitsha',
+  );
+
+  assert.deepEqual(results.map((product) => product.id), ['similar-match-onitsha', 'exact-match-lagos']);
+});
+
 test('matches related product vocabulary without losing specific item constraints', () => {
   const results = matchCatalogProducts(
     [{ id: 'sandals', product: 'Leather Sandals', category: 'Footwear' }],

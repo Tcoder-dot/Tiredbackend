@@ -166,7 +166,7 @@ export function matchCatalogProducts(
     const city = String(rawProduct.city || '').trim();
     const state = String(rawProduct.state || '').trim();
     const productLocation = normalizeText(`${city} ${state}`);
-    const locationMatch = normalizedLocation && productLocation.includes(normalizedLocation);
+    const locationMatch = Boolean(normalizedLocation && productLocation.includes(normalizedLocation));
     const score =
       (titleText.includes(normalizeText(query)) ? 1000 : 0) +
       matchedTitleTerms.length * 120 +
@@ -185,6 +185,7 @@ export function matchCatalogProducts(
     if (!id) return [];
     return [{
       score,
+      locationMatch,
       product: {
         ...rawProduct,
         id,
@@ -213,6 +214,6 @@ export function matchCatalogProducts(
     }];
   });
 
-  matched.sort((a, b) => b.score - a.score);
+  matched.sort((a, b) => Number(b.locationMatch) - Number(a.locationMatch) || b.score - a.score);
   return matched.slice(0, maxResults).map(({ product }) => product);
 }
