@@ -19,6 +19,8 @@ interface MerchantDashboardProps {
   onOpenStorefront: (slug: string) => void;
 }
 
+type PendingProductPhoto = { file: File | null; url: string };
+
 export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   merchantSlug,
   onLogout,
@@ -36,8 +38,7 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   const [newPrice, setNewPrice] = useState("");
   const [newCategory, setNewCategory] = useState("Gadgets & Phones");
   const [newCondition, setNewCondition] = useState<"new" | "used" | "refurbished" | "">("");
-  const [newPhotoFile, setNewPhotoFile] = useState<File | null>(null);
-  const [newPhotoPreview, setNewPhotoPreview] = useState<string>("");
+  const [newProductPhotos, setNewProductPhotos] = useState<PendingProductPhoto[]>([]);
   const [newDescription, setNewDescription] = useState("");
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [isAddingProduct, setIsAddingProduct] = useState(false);
@@ -46,16 +47,27 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   const [updatingConditionId, setUpdatingConditionId] = useState<string | null>(null);
   const [sharedProductId, setSharedProductId] = useState<string | null>(null);
   const galleryFileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const productPhotoPreviewUrlsRef = React.useRef(new Set<string>());
+  const updateNewProductPhotos = (photos: PendingProductPhoto[]) => {
+    const retainedUrls = new Set(photos.filter((photo) => photo.file).map((photo) => photo.url));
+    productPhotoPreviewUrlsRef.current.forEach((url) => {
+      if (!retainedUrls.has(url)) {
+        URL.revokeObjectURL(url);
+        productPhotoPreviewUrlsRef.current.delete(url);
+      }
+    });
+    setNewProductPhotos(photos);
+  };
   const isApprovedMerchant = vendor?.isVerified === true || vendor?.verified === true;
   const verificationStatus = vendor?.verificationStatus || (isApprovedMerchant ? "APPROVED" : "PENDING_REVIEW");
   const isRejectedMerchant = verificationStatus === "REJECTED";
   const productLimit = isApprovedMerchant ? 7 : 2;
   const productLimitReached = products.length >= productLimit;
 
-  useEffect(() => {
-    if (!newPhotoPreview.startsWith("blob:")) return;
-    return () => URL.revokeObjectURL(newPhotoPreview);
-  }, [newPhotoPreview]);
+  useEffect(() => () => {
+    productPhotoPreviewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    productPhotoPreviewUrlsRef.current.clear();
+  }, []);
 
   useEffect(() => {
     const loadData = async () => {
@@ -139,16 +151,17 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
     setIsLoading(true);
     setProductError("");
     try {
-      const productImageUrl = newPhotoFile
-        ? await uploadCatalogProductImage(newPhotoFile)
-        : undefined;
+      const photos = await Promise.all(newProductPhotos.map((photo) =>
+        photo.file ? uploadCatalogProductImage(photo.file) : Promise.resolve(photo.url)
+      ));
       const payload = {
         vendorPhone,
         name: newTitle.trim(),
         price: newPrice,
         description: newDescription.trim(),
         category: newCategory,
-        imageUrl: productImageUrl,
+        imageUrl: photos[0] || "",
+        photos,
         condition: newCondition || undefined
       };
       const result = editingProductId
@@ -163,8 +176,7 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
         : [result.product!, ...current]);
       setNewTitle("");
       setNewPrice("");
-      setNewPhotoFile(null);
-      setNewPhotoPreview("");
+      updateNewProductPhotos([]);
       if (galleryFileInputRef.current) galleryFileInputRef.current.value = "";
       setNewDescription("");
       setNewCondition("");
@@ -190,9 +202,9 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
         ? product.condition
         : ""
     );
-    setNewPhotoFile(null);
+    const productPhotos = [...new Set([...(product.photos || []), product.photo_url].filter(Boolean))].slice(0, 4);
+    updateNewProductPhotos(productPhotos.map((url) => ({ file: null, url })));
     if (galleryFileInputRef.current) galleryFileInputRef.current.value = "";
-    setNewPhotoPreview(product.photo_url || "");
     setNewDescription(product.description || "");
     setProductError("");
     setIsAddingProduct(true);
@@ -203,9 +215,8 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
     setEditingProductId(null);
     setNewTitle("");
     setNewPrice("");
-    setNewPhotoFile(null);
+    updateNewProductPhotos([]);
     if (galleryFileInputRef.current) galleryFileInputRef.current.value = "";
-    setNewPhotoPreview("");
     setNewDescription("");
     setNewCondition("");
   };
@@ -256,21 +267,34 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   };
 
   const handleGalleryFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
-      setProductError("Choose a JPG, PNG, or WebP product image.");
-      e.target.value = "";
-      return;
-    }
-    if (file.size > 8 * 1024 * 1024) {
-      setProductError("Product images must be 8 MB or smaller.");
-      e.target.value = "";
-      return;
-    }
-    setProductError("");
-    setNewPhotoFile(file);
-    setNewPhotoPreview(URL.createObjectURL(file));
+    const files = Array.from(e.currentTarget.files || []);
+    e.currentTarget.value = "";
+    if (!files.length) return;
+
+    const slotsRemaining = Math.max(0, 4 - newProductPhotos.length);
+    const errors: string[] = [];
+    const validFiles = files.filter((file) => {
+      const supportedMimeType = ["image/jpeg", "image/png", "image/webp"].includes(file.type.toLowerCase());
+      const supportedExtension = /\.(jpe?g|png|webp)$/i.test(file.name);
+      if (!supportedMimeType && !supportedExtension) {
+        errors.push(`${file.name} is not a supported photo. Choose a JPG, PNG, or WebP image.`);
+        return false;
+      }
+      if (!file.size || file.size > 8 * 1024 * 1024) {
+        errors.push(`${file.name} must be larger than 0 bytes and no larger than 8 MB.`);
+        return false;
+      }
+      return true;
+    }).slice(0, slotsRemaining);
+
+    if (files.length > slotsRemaining) errors.push("A product can have up to 4 photos.");
+    const newPhotos = validFiles.map((file) => {
+      const url = URL.createObjectURL(file);
+      productPhotoPreviewUrlsRef.current.add(url);
+      return { file, url };
+    });
+    if (newPhotos.length) updateNewProductPhotos([...newProductPhotos, ...newPhotos]);
+    setProductError(errors.join(" "));
   };
 
   if (isLoading) {
@@ -594,39 +618,42 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
                     </div>
 
                     <div className="space-y-1">
-                      <label className="text-xs font-extrabold text-[#123F16]/80">Product Photo Upload</label>
+                      <label className="text-xs font-extrabold text-[#123F16]/80">Product Photos (up to 4)</label>
                       <input
                         type="file"
-                        accept="image/jpeg,image/png,image/webp"
+                        accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                        multiple
                         ref={galleryFileInputRef}
                         onChange={handleGalleryFileSelect}
                         className="hidden"
                       />
                       <button
                         type="button"
+                        disabled={newProductPhotos.length >= 4}
                         onClick={() => galleryFileInputRef.current?.click()}
-                        className="w-full h-11 px-3.5 rounded-xl border border-dashed border-[#123F16]/30 hover:border-[#123F16] bg-[#F7F7F2] text-xs font-bold text-[#123F16] flex items-center justify-center gap-2 transition cursor-pointer"
+                        className="w-full h-11 px-3.5 rounded-xl border border-dashed border-[#123F16]/30 hover:border-[#123F16] bg-[#F7F7F2] text-xs font-bold text-[#123F16] flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <Upload className="w-4 h-4 text-[#FFC107]" />
-                        <span>{newPhotoPreview ? "Change Photo" : "Upload Product Photo"}</span>
+                        <span>Add Photos ({newProductPhotos.length}/4)</span>
                       </button>
                     </div>
                   </div>
 
-                  {newPhotoPreview && (
-                    <div className="w-24 h-24 rounded-xl overflow-hidden border border-slate-300 relative">
-                      <img src={newPhotoPreview} alt="Preview" className="w-full h-full object-cover" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setNewPhotoPreview("");
-                          setNewPhotoFile(null);
-                          if (galleryFileInputRef.current) galleryFileInputRef.current.value = "";
-                        }}
-                        className="absolute top-1 right-1 bg-black/60 text-white rounded-full p-1"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
+                  {newProductPhotos.length > 0 && (
+                    <div className="flex flex-wrap gap-3">
+                      {newProductPhotos.map((photo, index) => (
+                        <div key={`${photo.url}-${index}`} className="w-24 h-24 rounded-xl overflow-hidden border border-slate-300 relative">
+                          <img src={photo.url} alt={`Product photo ${index + 1}`} className="w-full h-full object-cover" />
+                          <button
+                            type="button"
+                            aria-label={`Remove product photo ${index + 1}`}
+                            onClick={() => updateNewProductPhotos(newProductPhotos.filter((_, photoIndex) => photoIndex !== index))}
+                            className="absolute top-1 right-1 bg-black/60 text-white rounded-full p-1"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
                     </div>
                   )}
 

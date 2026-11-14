@@ -391,19 +391,55 @@ export interface AddProductPayload {
   category?: string;
   imageUrl?: string;
   image?: string;
+  photos?: string[];
   condition?: "new" | "used" | "refurbished";
 }
 
 export async function uploadCatalogProductImage(file: File): Promise<string> {
-  const response = await fetch(`${FLOATE_API_URL}/api/catalog/product/image`, {
-    method: "POST",
-    headers: {
-      "Accept": "application/json",
-      "Content-Type": file.type,
-      "x-api-key": FLOATE_API_KEY
-    },
-    body: file
-  });
+  const token = typeof localStorage !== "undefined" ? localStorage.getItem("floate_auth_token") : null;
+  if (!token) throw new Error("Log in with your business WhatsApp number to upload a product image.");
+  if (!file.size || file.size > 8 * 1024 * 1024) {
+    throw new Error("Choose a product image larger than 0 bytes and no larger than 8 MB.");
+  }
+
+  let header: Uint8Array;
+  try {
+    header = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  } catch (error) {
+    console.warn("[Floate API] Could not inspect product image bytes:", error);
+    throw new Error(`${file.name || "This photo"} could not be read. Choose a JPG, PNG, or WebP photo.`);
+  }
+  let imageMimeType = "";
+  if (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
+    imageMimeType = "image/jpeg";
+  } else if (header.length >= 8 &&
+    [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((value, index) => header[index] === value)) {
+    imageMimeType = "image/png";
+  } else if (header.length >= 12 &&
+    String.fromCharCode(...header.slice(0, 4)) === "RIFF" &&
+    String.fromCharCode(...header.slice(8, 12)) === "WEBP") {
+    imageMimeType = "image/webp";
+  }
+  if (!imageMimeType) {
+    throw new Error(`${file.name || "This photo"} could not be read. Choose a JPG, PNG, or WebP photo.`);
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${FLOATE_API_URL}/api/catalog/product/image`, {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": imageMimeType,
+        Authorization: `Bearer ${token}`
+      },
+      credentials: "include",
+      body: file
+    });
+  } catch (error) {
+    console.error("[Floate API] Product image upload could not reach the backend:", error);
+    throw new Error("Product image upload could not reach Floate. Check your connection and try again.");
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.success || typeof data.imageUrl !== "string") {
     throw new Error(data.error || `Product image upload failed (HTTP ${response.status}).`);
@@ -416,6 +452,9 @@ export async function uploadCatalogProductImage(file: File): Promise<string> {
  * POST ${NEXT_PUBLIC_FLOATE_API_URL}/api/catalog/product
  */
 export async function addCatalogProduct(payload: AddProductPayload): Promise<{ success: boolean; product?: Product; error?: string }> {
+  const token = typeof localStorage !== "undefined" ? localStorage.getItem("floate_auth_token") : null;
+  if (!token) return { success: false, error: "Log in with your business WhatsApp number to add products." };
+
   const reqBody = {
     vendorPhone: payload.vendorPhone,
     phone: payload.vendorPhone,
@@ -428,6 +467,7 @@ export async function addCatalogProduct(payload: AddProductPayload): Promise<{ s
     description: payload.description || "",
     category: payload.category || "General Merchandise",
     imageUrl: payload.imageUrl || payload.image || "",
+    ...(payload.photos !== undefined ? { photos: payload.photos } : {}),
     photoBase64: payload.imageUrl || payload.image || "",
     condition: payload.condition
   };
@@ -438,7 +478,7 @@ export async function addCatalogProduct(payload: AddProductPayload): Promise<{ s
       headers: {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "x-api-key": FLOATE_API_KEY
+        Authorization: `Bearer ${token}`
       },
       body: JSON.stringify(reqBody)
     });
@@ -465,7 +505,7 @@ export async function addCatalogProduct(payload: AddProductPayload): Promise<{ s
   try {
     const localRes = await fetch("/api/catalog/product", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify(reqBody)
     });
     if (localRes.ok) {
@@ -491,13 +531,16 @@ export async function updateCatalogProduct(
   payload: AddProductPayload
 ): Promise<{ success: boolean; product?: Product; error?: string }> {
   try {
+    const token = typeof localStorage !== "undefined" ? localStorage.getItem("floate_auth_token") : null;
+    if (!token) throw new Error("Log in with your business WhatsApp number to update products.");
     const response = await fetch(`${FLOATE_BACKEND_URL}/api/catalog/product/${encodeURIComponent(productId)}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "x-api-key": FLOATE_API_KEY
+        Authorization: `Bearer ${token}`
       },
+      credentials: "include",
       body: JSON.stringify({
         vendorPhone: payload.vendorPhone,
         phone: payload.vendorPhone,
@@ -507,6 +550,7 @@ export async function updateCatalogProduct(
         price: payload.price,
         description: payload.description || "",
         category: payload.category || "General Merchandise",
+        ...(payload.photos !== undefined ? { photos: payload.photos } : {}),
         ...(payload.imageUrl || payload.image
           ? { imageUrl: payload.imageUrl || payload.image }
           : {}),
