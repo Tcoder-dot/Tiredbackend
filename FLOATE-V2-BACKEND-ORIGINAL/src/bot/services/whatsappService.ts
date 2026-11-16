@@ -5492,6 +5492,17 @@ export async function processMasterWhatsAppEngine(params: {
     const confirmation = session.pendingLocationConfirmation;
     const lower = text.toLowerCase().trim();
 
+    const inputClassification = await classifyInboundIntent(text);
+    if (inputClassification.intent === 'BUYER_SEARCH') {
+      updateWhatsAppSession(cleanPhone, {
+        state: 'IDLE',
+        pendingInitialText: undefined,
+        pendingLocationConfirmation: undefined,
+      });
+      await execute10CardSearch(cleanPhone, senderName, { queryText: text });
+      return;
+    }
+
     let resolvedLocation = confirmation.suggestedLocation;
     if (/^(yes|yeah|yup|y|correct|sure|it is|confirm|btn_confirm_loc)$/i.test(lower)) {
       resolvedLocation = confirmation.suggestedLocation;
@@ -5675,6 +5686,15 @@ export async function processMasterWhatsAppEngine(params: {
     }
 
     const inputClassification = await classifyInboundIntent(locInput);
+    if (inputClassification.intent === 'BUYER_SEARCH') {
+      updateWhatsAppSession(cleanPhone, {
+        state: 'IDLE',
+        pendingInitialText: undefined,
+      });
+      await execute10CardSearch(cleanPhone, senderName, { queryText: locInput });
+      return;
+    }
+
     if (
       inputClassification.intent === 'BRAND_QUESTION' ||
       inputClassification.intent === 'SMALL_TALK' ||
