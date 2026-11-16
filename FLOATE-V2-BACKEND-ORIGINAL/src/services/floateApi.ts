@@ -151,6 +151,7 @@ export function getVendorWhatsAppLink(
 }
 
 export interface RegisterBusinessPayload {
+  accountType?: "buyer" | "business" | string;
   businessName: string;
   ownerName: string;
   phone: string;
@@ -214,6 +215,7 @@ export async function registerBusiness(
 ): Promise<RegisterBusinessResponse> {
   const businessSlug = createMerchantSlug(payload.businessName);
   const bodyData = {
+    accountType: (payload.accountType || "business").trim().toLowerCase() || "business",
     registrationVerificationToken,
     businessName: payload.businessName.trim(),
     ownerName: payload.ownerName.trim(),
