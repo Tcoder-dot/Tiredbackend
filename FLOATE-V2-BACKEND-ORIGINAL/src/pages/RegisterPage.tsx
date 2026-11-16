@@ -1599,7 +1599,7 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
                 {businessName} is under review
               </h1>
               <p className="text-sm text-[#5B6E66] max-w-lg mx-auto font-medium">
-                Your business profile has been submitted. You can manage your storefront and add up to two products while our team reviews it.
+                Your business profile has been submitted. You can manage your storefront and add products while our team reviews it.
               </p>
             </div>
 
@@ -1610,7 +1610,7 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
                 <span>Verification Status: Under review</span>
               </div>
               <p className="text-[12px] text-amber-800 leading-relaxed font-medium">
-                We’ll notify you on WhatsApp when your review is complete. Until then, your storefront and up to two products will be marked as not verified.
+                We’ll notify you on WhatsApp when your review is complete. Until then, your storefront and products will be marked as not verified.
               </p>
             </div>
 

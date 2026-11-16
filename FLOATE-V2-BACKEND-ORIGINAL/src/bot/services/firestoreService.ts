@@ -2047,13 +2047,6 @@ export class FirestoreService {
 
     const isVerified = currentMerchant.isVerified === true;
     const verificationStatus = currentMerchant.verificationStatus || (isVerified ? 'APPROVED' : 'PENDING_REVIEW');
-    const currentProducts = await this.getProductsByMerchant(data.whatsapp);
-    const paidProductSlots = Math.max(0, Number(currentMerchant.paidProductSlots || 0));
-    const productLimit = 5 + paidProductSlots;
-    if (currentProducts.length >= productLimit) {
-      throw new Error(`PRODUCT_LIMIT_REACHED:${productLimit}`);
-    }
-
     const prodDoc: ProductDoc = {
       id: prodId,
       merchantId,

@@ -61,8 +61,6 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   const isApprovedMerchant = vendor?.isVerified === true || vendor?.verified === true;
   const verificationStatus = vendor?.verificationStatus || (isApprovedMerchant ? "APPROVED" : "PENDING_REVIEW");
   const isRejectedMerchant = verificationStatus === "REJECTED";
-  const productLimit = isApprovedMerchant ? 7 : 2;
-  const productLimitReached = products.length >= productLimit;
 
   useEffect(() => () => {
     productPhotoPreviewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
@@ -136,10 +134,6 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   const handleAddProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim() || !newPrice.trim()) return;
-    if (!editingProductId && productLimitReached) {
-      setProductError(`Your ${isApprovedMerchant ? "approved" : "pending"} account can list up to ${productLimit} products.`);
-      return;
-    }
 
     const vendorPhone = vendor?.whatsapp_number;
     if (!vendorPhone) {
@@ -364,10 +358,10 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
                 <h2 className="text-sm font-extrabold">{isRejectedMerchant ? "Business not approved" : "Business verification pending"}</h2>
                 <p className="text-xs leading-relaxed">
                   {isRejectedMerchant
-                    ? vendor?.verificationReason || "Your account is not verified. Your existing products remain listed, but the account is limited to two products."
-                    : "Your business is under review. You can list up to two products; we’ll notify you on WhatsApp when your review is complete."}
+                    ? vendor?.verificationReason || "Your account is not verified. Your existing products remain listed."
+                    : "Your business is under review. You can add products while we review your account; we’ll notify you on WhatsApp when your review is complete."}
                 </p>
-                <p className="text-xs font-bold">Products: {products.length} / {productLimit}</p>
+                <p className="text-xs font-bold">Products: {products.length}</p>
               </div>
             </div>
           </div>
@@ -511,16 +505,15 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
             <div className="flex items-center justify-between">
               <h2 className="text-base font-extrabold text-[#123F16]">Your Storefront Inventory</h2>
               <button
-                disabled={productLimitReached}
                 onClick={() => {
                   handleCancelProductForm();
                   setIsAddingProduct(true);
                 }}
                 className="px-4 py-2 rounded-xl bg-[#123F16] hover:bg-[#1B5E20] text-[#FFC107] text-xs font-extrabold transition flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50 disabled:cursor-not-allowed"
-                title={productLimitReached ? `Product limit reached (${productLimit})` : "Add a product"}
+                title="Add a product"
               >
                 <Plus className="w-4 h-4" />
-                <span>{productLimitReached ? "Limit Reached" : `Add Product (${products.length}/${productLimit})`}</span>
+                <span>Add Product</span>
               </button>
             </div>
 

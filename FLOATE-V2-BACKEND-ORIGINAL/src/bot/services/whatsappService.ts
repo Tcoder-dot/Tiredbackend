@@ -4448,7 +4448,7 @@ export async function processMasterWhatsAppEngine(params: {
       await sendWhatsAppMessage(
         pending.whatsapp,
         `🎉 *Your Floate business is approved!*\n\n` +
-        `Your storefront is now marked *Verified*. You can add up to *7 products total* (your first 2 plus 5 more).\n\n` +
+        `Your storefront is now marked *Verified*. You can list as many products as you need.\n\n` +
         `Open your merchant dashboard to manage your catalog:\n${dashboardUrl}`
       ).catch((error) => console.warn('[WhatsApp Admin Approval Merchant Notice]:', error));
       await sendWhatsAppMessage(cleanPhone, `✅ ${pending.businessName} is approved and the merchant has been notified.`);
@@ -4531,7 +4531,7 @@ export async function processMasterWhatsAppEngine(params: {
       cleanPhone,
       `👋 Hi ${displayName}welcome to *Floate for Businesses*!\n\n` +
       `Register your business using the secure form below:\n${registerUrl}\n\n` +
-      `After registration, your merchant dashboard will let you list up to two products while your business is reviewed. We’ll notify you on WhatsApp when your status changes.`
+      `After registration, your merchant dashboard will let you list as many products as you need while your business is reviewed. We’ll notify you on WhatsApp when your status changes.`
     );
     return;
   }
@@ -8868,12 +8868,9 @@ export async function handleVendorAddProductWizard(params: {
       } catch (error) {
         console.error(`[WhatsApp Product Publish Error] +${cleanPhone}:`, error);
         const message = error instanceof Error ? error.message : '';
-        const limitMatch = message.match(/^PRODUCT_LIMIT_REACHED:(\d+)$/);
         await sendWhatsAppMessage(
           cleanPhone,
-          limitMatch
-            ? `You have reached your current limit of ${limitMatch[1]} product listings. Please update or remove an existing listing before adding another.`
-            : `⚠️ I couldn't publish this product right now. Your photo and details are still saved in this chat. Reply *Publish Product* to retry, or *Cancel* to discard it.`,
+          `⚠️ I couldn't publish this product right now. Your photo and details are still saved in this chat. Reply *Publish Product* to retry, or *Cancel* to discard it.`,
           {
             quickReplies: [
               { id: 'btn_confirm_add_product', title: '🚀 Retry Publish' },
@@ -12029,9 +12026,9 @@ async function handleRegistrationSteps(
   }
 
   // TIER 3: AUTO_APPROVE (Standard Commerce)
-  // Save each parsed product individually up to the 3 free product listings limit
+  // Save every product parsed from the registration message.
   const activeProducts = parsed.parsedProducts && parsed.parsedProducts.length > 0
-    ? parsed.parsedProducts.slice(0, 3)
+    ? parsed.parsedProducts
     : [{ productName: prodDesc, price: priceRange }];
 
   // Save the primary listing to Firestore.

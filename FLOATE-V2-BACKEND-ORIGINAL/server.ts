@@ -1741,25 +1741,8 @@ app.post(
     }
 
     const merchant = merchantDoc.data();
-    const currentProductDocs = await adminFirestoreDb.collection("products").get();
-    const currentProductCount = currentProductDocs.docs.filter((productDoc) => {
-      const product = productDoc.data();
-      return normalizeWhatsAppNumber(product.vendorPhone || product.whatsapp || product.phone) === normalizedVendorPhone;
-    }).length;
     const isApprovedMerchant = merchant.isVerified === true || merchant.verified === true ||
       merchant.verificationStatus === "APPROVED" || merchant.status === "ACTIVE";
-    const paidProductSlots = Math.max(0, Number(merchant.paidProductSlots || 0));
-    const productLimit = 5 + paidProductSlots;
-    if (currentProductCount >= productLimit) {
-      return res.status(403).json({
-        success: false,
-        code: "PRODUCT_LIMIT_REACHED",
-        limit: productLimit,
-        count: currentProductCount,
-        error: `Your account can list up to ${productLimit} products. Buy 5 extra slots for ₦1,000 to expand your catalog.`
-      });
-    }
-
     const businessName = merchant.businessName || merchant.name || "Market Merchant";
     const merchantSlug = createMerchantSlug(businessName) || merchant.slug || merchantDoc.id;
     const merchantCity = merchant.city || "Lagos";

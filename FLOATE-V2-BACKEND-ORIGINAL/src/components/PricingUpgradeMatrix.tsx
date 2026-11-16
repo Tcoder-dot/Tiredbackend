@@ -37,7 +37,7 @@ const LAUNCH_PACKAGES: PricingPackage[] = [
     features: [
       "Visual KYC badge on storefront",
       "Public market directory search indexing",
-      "Basic catalog display (up to 10 items)",
+      "Unlimited catalog items",
       "Direct WhatsApp chat button"
     ],
     colorTheme: "green"
