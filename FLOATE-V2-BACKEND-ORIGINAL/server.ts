@@ -1224,14 +1224,14 @@ app.post("/api/register/business/check", async (req, res) => {
 
 // Registration Endpoint: POST /api/register/business
 app.post("/api/register/business", async (req, res) => {
-  const {
-    businessName,
-    ownerName,
-    phone,
-    state,
-    city,
-    category,
-    marketHub,
+  const { 
+    businessName, 
+    ownerName, 
+    phone, 
+    state, 
+    city, 
+    category, 
+    marketHub, 
     stallAddress,
     hasPhysicalStore,
     storeType,
@@ -1241,33 +1241,27 @@ app.post("/api/register/business", async (req, res) => {
     selfieUrl,
     profilePhoto,
     coordinates,
-    initialProduct,
-    accountType,
+    initialProduct 
   } = req.body;
-  const normalizedAccountType = String(accountType || "business").toLowerCase();
-  const isBuyerAccount = ["buyer", "customer", "consumer", "shopper"].includes(normalizedAccountType);
-  const isBusinessAccount = !isBuyerAccount;
   const intlPhone = normalizeWhatsAppNumber(phone) || "";
   const photo = profileImageUrl || selfieUrl || profilePhoto || "";
   const initialProductImage = String(initialProduct?.image || "");
-  const merchantSlug = normalizeRegistrationName(businessName || (isBuyerAccount ? `${ownerName || "Buyer"} account` : ""));
-  const ownerNameSlug = normalizeRegistrationName(ownerName || (isBuyerAccount ? "Buyer" : ""));
+  const merchantSlug = normalizeRegistrationName(businessName);
+  const ownerNameSlug = normalizeRegistrationName(ownerName);
 
   if (!merchantSlug || !ownerNameSlug || !normalizeWhatsAppNumber(phone)) {
-    return res.status(400).json({ success: false, error: isBuyerAccount ? "Enter a valid buyer profile name, owner name, and WhatsApp number." : "Enter a valid business name, owner name, and WhatsApp number." });
+    return res.status(400).json({ success: false, error: "Enter a valid business name, owner name, and WhatsApp number." });
   }
-  if (isBusinessAccount) {
-    try {
-      const profileImage = new URL(String(photo || ""));
-      if (profileImage.protocol !== "https:" || profileImage.hostname !== "res.cloudinary.com") {
-        return res.status(400).json({ success: false, error: "A captured profile selfie is required to register." });
-      }
-    } catch {
+  try {
+    const profileImage = new URL(String(photo || ""));
+    if (profileImage.protocol !== "https:" || profileImage.hostname !== "res.cloudinary.com") {
       return res.status(400).json({ success: false, error: "A captured profile selfie is required to register." });
     }
-    if (initialProductImage && !isCloudinaryImageUrl(initialProductImage)) {
-      return res.status(400).json({ success: false, error: "Upload the first product image before submitting registration." });
-    }
+  } catch {
+    return res.status(400).json({ success: false, error: "A captured profile selfie is required to register." });
+  }
+  if (initialProductImage && !isCloudinaryImageUrl(initialProductImage)) {
+    return res.status(400).json({ success: false, error: "Upload the first product image before submitting registration." });
   }
 
   const registrationVerificationToken = req.get("x-registration-verification-token") ||
@@ -1318,11 +1312,11 @@ app.post("/api/register/business", async (req, res) => {
           remoteData || { success: false, error: "Backend returned an invalid registration response." }
         );
       }
-      remoteData.storeUrl = isBuyerAccount ? "/" : `/vendor/${merchantSlug}`;
+      remoteData.storeUrl = `/vendor/${merchantSlug}`;
       remoteData.verified = false;
       remoteData.isVerified = false;
-      remoteData.verification_status = isBuyerAccount ? "buyer" : "pending_review";
-      remoteData.status = isBuyerAccount ? "buyer" : "pending_review";
+      remoteData.verification_status = "pending_review";
+      remoteData.status = "pending_review";
       return res.status(remoteRes.status).json(remoteData);
     } catch (e) {
       console.error("[Server] Configured upstream registration failed:", e);
@@ -1397,8 +1391,6 @@ app.post("/api/register/business", async (req, res) => {
 
     const credentialLocation = [city || marketHub, state].filter(Boolean);
     if (!credentialLocation.some((part) => String(part).toLowerCase() === "nigeria")) credentialLocation.push("Nigeria");
-    const accountRole = isBuyerAccount ? "customer" : "vendor";
-    const normalizedBusinessName = businessName || (isBuyerAccount ? `${ownerName || "Buyer"} Buyer Profile` : "Market Merchant");
     const credential = createCredentialForMerchant({
       merchantId: docId,
       name: ownerName || businessName || "Floate Merchant",
@@ -1410,15 +1402,13 @@ app.post("/api/register/business", async (req, res) => {
     const businessData = {
       id: docId,
       slug: merchantSlug,
-      accountType: isBuyerAccount ? "buyer" : "business",
-      role: accountRole,
-      businessName: normalizedBusinessName,
-      name: normalizedBusinessName,
+      businessName: businessName || "Market Merchant",
+      name: businessName || "Market Merchant",
       whatsapp: intlPhone,
       whatsappNumber: intlPhone,
       phone: intlPhone,
-      hasPhysicalStore: isBuyerAccount ? false : isPhysical,
-      storeType: isBuyerAccount ? "buyer" : resolvedStoreType,
+      hasPhysicalStore: isPhysical,
+      storeType: resolvedStoreType,
       state: state || "Lagos",
       city: city || "Lagos",
       category: category || "General Merchandise",
@@ -1433,9 +1423,9 @@ app.post("/api/register/business", async (req, res) => {
       avatar_url: photo,
       verified: false,
       isVerified: false,
-      verificationStatus: isBuyerAccount ? "BUYER_ACCOUNT" : "PENDING_REVIEW",
-      verification_status: isBuyerAccount ? "buyer" : "pending_review",
-      status: isBuyerAccount ? "BUYER_ACCOUNT" : "PENDING_REVIEW",
+      verificationStatus: "PENDING_REVIEW",
+      verification_status: "pending_review",
+      status: "PENDING_REVIEW",
       initialProduct: initialProduct || null,
       products: initialProductList,
       createdAt
@@ -1510,8 +1500,8 @@ app.post("/api/register/business", async (req, res) => {
       products: initialProduct?.name || "",
       initialProduct: initialProduct || null,
       profile_photo_url: photo,
-      status: isBuyerAccount ? "buyer" : "pending_review",
-      verification_status: isBuyerAccount ? "buyer" : "pending_review",
+      status: "pending_review",
+      verification_status: "pending_review",
       registration_data: Object.fromEntries(
         Object.entries(req.body || {}).filter(([key]) => key !== "registrationVerificationToken")
       ),
@@ -1520,17 +1510,17 @@ app.post("/api/register/business", async (req, res) => {
       notification_status: "not_sent"
     }, { merge: true });
 
-    console.log(`[Floate OS] New ${isBuyerAccount ? "buyer" : "merchant"} profile created: ${normalizedBusinessName} (${intlPhone}) in ${marketHub || city}.`);
+    console.log(`[Floate OS] New merchant queued for admin review: ${businessName} (${intlPhone}) in ${marketHub || city}.`);
 
     return res.json({
       success: true,
-      message: isBuyerAccount ? "Buyer account created successfully." : "Business registration submitted and is awaiting admin review.",
+      message: "Business registration submitted and is awaiting admin review.",
       phone: intlPhone,
-      storeUrl: isBuyerAccount ? "/" : `/vendor/${merchantSlug}`,
+      storeUrl: `/vendor/${merchantSlug}`,
       verified: false,
       isVerified: false,
-      verification_status: isBuyerAccount ? "buyer" : "pending_review",
-      status: isBuyerAccount ? "buyer" : "pending_review",
+      verification_status: "pending_review",
+      status: "pending_review",
     });
   } catch (err: any) {
     console.error("[Registration] Could not persist business registration:", err);

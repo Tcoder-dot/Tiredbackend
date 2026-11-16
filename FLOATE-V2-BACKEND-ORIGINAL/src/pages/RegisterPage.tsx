@@ -74,7 +74,6 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3 | 4 | 5>(1);
 
   // STEP 1: Business Details (NO selfie on this first form)
-  const [accountType, setAccountType] = useState<"buyer" | "business">("business");
   const [businessName, setBusinessName] = useState("");
   const [ownerName, setOwnerName] = useState("");
   const [phone, setPhone] = useState("");
@@ -460,14 +459,12 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
     }
   };
 
-  const isBusinessReg = accountType === "business";
-
   const handleGoToStep2 = (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg("");
 
     if (!businessName.trim()) {
-      setErrorMsg(isBusinessReg ? "Please enter your business or stall name." : "Please enter your name or buyer profile label.");
+      setErrorMsg("Please enter your business or stall name.");
       return;
     }
     if (!ownerName.trim()) {
@@ -486,10 +483,6 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
     }
     if (!state.trim() || !city.trim()) {
       setErrorMsg("Please select your state and enter your city.");
-      return;
-    }
-    if (!isBusinessReg && (!businessName.trim() || !ownerName.trim())) {
-      setErrorMsg("Please enter your name and a buyer profile name.");
       return;
     }
     if (!isPhoneVerified) {
@@ -519,15 +512,13 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
     e.preventDefault();
     setErrorMsg("");
 
-    if (accountType === "business") {
-      if (!prodName.trim()) {
-        setErrorMsg("Please enter the name or title of your first product.");
-        return;
-      }
-      if (!prodPrice.trim()) {
-        setErrorMsg("Please enter the product price in Naira.");
-        return;
-      }
+    if (!prodName.trim()) {
+      setErrorMsg("Please enter the name or title of your first product.");
+      return;
+    }
+    if (!prodPrice.trim()) {
+      setErrorMsg("Please enter the product price in Naira.");
+      return;
     }
 
     setIsSubmitting(true);
@@ -539,11 +530,10 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
         : (cleanDigits.startsWith("234") ? cleanDigits : "234" + cleanDigits);
 
       const payload = {
-        accountType,
         businessName: businessName.trim(),
         ownerName: ownerName.trim(),
         phone: phone.trim(),
-        hasPhysicalStore: accountType === "business" ? businessModel === "physical_stall" : false,
+        hasPhysicalStore: businessModel === "physical_stall",
         businessModel,
         storeType: businessModel === "physical_stall" ? "physical_store" : "online_dispatch",
         addressType: "Home Address",
@@ -556,14 +546,14 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
         marketHub: marketHub.trim(),
         selfieUrl: selfieBase64,
         coordinates: gpsCoordinates || undefined,
-        initialProduct: accountType === "business" ? {
+        initialProduct: {
           name: prodName.trim(),
           price: prodPrice.trim().replace(/[^0-9.]/g, ""),
           description: prodDescription.trim() || `${prodName.trim()} available at ${businessName.trim()}`,
           image: prodImageBase64 || undefined,
           isDiscount: isDiscountSale,
           originalPrice: isDiscountSale ? originalPrice.trim() : undefined
-        } : undefined,
+        }
       };
 
       const result = await registerBusiness(payload, registrationVerificationToken);
@@ -571,41 +561,34 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
         throw new Error(result.error || result.message || "Registration could not be saved. Please try again.");
       }
 
-      localStorage.setItem("floate_account_type", accountType);
-      localStorage.setItem("floate_user_role", accountType === "business" ? "vendor" : "customer");
-
       // Save locally so merchant is immediately recognized and logged in
-      if (accountType === "business") {
-        const existingMerchants = JSON.parse(localStorage.getItem("floate_merchants") || "[]");
-        const localMerchant = {
-          id: `vendor_${intlPhone}`,
-          slug: intlPhone,
-          name: businessName.trim(),
-          ownerName: ownerName.trim(),
-          city: city.trim(),
-          state: state.trim(),
-          category: category.trim(),
-          hasPhysicalStore: businessModel === "physical_stall",
-          storeType: businessModel === "physical_stall" ? "physical_store" : "online_dispatch",
-          businessModel,
-          location: `${city.trim()}, ${state.trim()}`,
-          marketLocation: marketHub.trim(),
-          verificationStatus: result.verification_status || "REGISTERED",
-          verified: false,
-          isVerified: false,
-          verification_status: result.verification_status || "registered",
-          portfolioUrl: portfolioUrl.trim(),
-          avatar_url: selfieBase64,
-          bio: businessDescription.trim(),
-          whatsapp_number: intlPhone
-        };
+      const existingMerchants = JSON.parse(localStorage.getItem("floate_merchants") || "[]");
+      const localMerchant = {
+        id: `vendor_${intlPhone}`,
+        slug: intlPhone,
+        name: businessName.trim(),
+        ownerName: ownerName.trim(),
+        city: city.trim(),
+        state: state.trim(),
+        category: category.trim(),
+        hasPhysicalStore: businessModel === "physical_stall",
+        storeType: businessModel === "physical_stall" ? "physical_store" : "online_dispatch",
+        businessModel,
+        location: `${city.trim()}, ${state.trim()}`,
+        marketLocation: marketHub.trim(),
+        verificationStatus: result.verification_status || "REGISTERED",
+        verified: false,
+        isVerified: false,
+        verification_status: result.verification_status || "registered",
+        portfolioUrl: portfolioUrl.trim(),
+        avatar_url: selfieBase64,
+        bio: businessDescription.trim(),
+        whatsapp_number: intlPhone
+      };
 
-        const updatedMerchants = [localMerchant, ...existingMerchants.filter((m: any) => m.slug !== intlPhone)];
-        localStorage.setItem("floate_merchants", JSON.stringify(updatedMerchants));
-        localStorage.setItem("floate_current_merchant_slug", intlPhone);
-      } else {
-        localStorage.removeItem("floate_current_merchant_slug");
-      }
+      const updatedMerchants = [localMerchant, ...existingMerchants.filter((m: any) => m.slug !== intlPhone)];
+      localStorage.setItem("floate_merchants", JSON.stringify(updatedMerchants));
+      localStorage.setItem("floate_current_merchant_slug", intlPhone);
 
       setRegistrationSuccess({
         ...result,
@@ -648,23 +631,6 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({
             <span className="hidden sm:inline">Back to Marketplace</span>
             <span className="sm:hidden">Home</span>
           </button>
-
-          <div className="hidden sm:flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setAccountType("buyer")}
-              className={`px-3 py-1.5 rounded-full text-[11px] font-black border transition ${accountType === "buyer" ? "bg-[#13241F] text-[#FACC15] border-[#13241F]" : "bg-white text-[#13241F] border-slate-200"}`}
-            >
-              Buyer
-            </button>
-            <button
-              type="button"
-              onClick={() => setAccountType("business")}
-              className={`px-3 py-1.5 rounded-full text-[11px] font-black border transition ${accountType === "business" ? "bg-[#123F16] text-white border-[#123F16]" : "bg-white text-[#13241F] border-slate-200"}`}
-            >
-              Business
-            </button>
-          </div>
 
           {/* Stepper Indicator */}
           <div className="flex items-center gap-1.5 sm:gap-3 text-xs font-black">

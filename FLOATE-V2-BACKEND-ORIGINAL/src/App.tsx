@@ -101,20 +101,6 @@ function AppContent() {
 
   const [isColdStartWakingUp, setIsColdStartWakingUp] = useState(false);
 
-  const getStoredAccountType = () => {
-    try {
-      const saved = localStorage.getItem("floate_account_type") || localStorage.getItem("floate_user_role") || "buyer";
-      return saved.toLowerCase();
-    } catch {
-      return "buyer";
-    }
-  };
-
-  const isBusinessAccount = () => {
-    const accountType = getStoredAccountType();
-    return ["business", "merchant", "vendor"].includes(accountType);
-  };
-
   // Ping backend handshake on initial load
   useEffect(() => {
     let active = true;
@@ -227,10 +213,7 @@ function AppContent() {
         setRoute({ type: "HUB", slug });
       } else if (pathname.startsWith("/merchant/dashboard")) {
         const slug = params.get("slug") || localStorage.getItem("floate_current_merchant_slug");
-        if (!isBusinessAccount()) {
-          setRoute({ type: "LANDING" });
-          updateUrl("/");
-        } else if (slug) {
+        if (slug) {
           setRoute({ type: "MERCHANT_DASHBOARD", slug });
         } else {
           setRoute({ type: "LOGIN" });
@@ -518,34 +501,6 @@ function AppContent() {
 
   // Merchant Dashboard Route
   if (route.type === "MERCHANT_DASHBOARD") {
-    if (!isBusinessAccount()) {
-      return (
-        <LandingPage
-          onSearch={(q) => handleNavigateSearch(q)}
-          onExploreStalls={handleNavigateFeed}
-          onOpenVendor={handleOpenVendor}
-          onOpenProduct={handleOpenProduct}
-          onSelectCategory={(cat) => handleNavigateSearch(cat)}
-          onSelectHub={handleOpenHub}
-          onNavigatePage={handleNavigatePage}
-          onOpenMerchantAuth={() => {
-            setRoute({ type: "REGISTER" });
-            updateUrl("/register");
-          }}
-          onOpenMerchantDashboard={() => {
-            const slug = localStorage.getItem("floate_current_merchant_slug");
-            if (slug) {
-              setRoute({ type: "MERCHANT_DASHBOARD", slug });
-              updateUrl("/merchant/dashboard", { slug });
-            } else {
-              setRoute({ type: "LOGIN" });
-              updateUrl("/login");
-            }
-          }}
-        />
-      );
-    }
-
     return (
       <MerchantDashboard
         merchantSlug={route.slug}
