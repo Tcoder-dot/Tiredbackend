@@ -2379,6 +2379,11 @@ export async function verifyRegistrationVerificationToken(phone: string, token: 
   );
 }
 
+router.get("/api/auth/merchant/config", (_req: Request, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  return res.json({ success: true, authMode: "whatsapp" });
+});
+
 router.post(["/api/v1/auth/whatsapp/request-code", "/api/auth/whatsapp/request-code"], async (req: Request, res: Response) => {
   const phone = String(req.body?.phone || req.body?.phoneNumber || "").trim();
   if (!phone) return res.status(400).json({ success: false, error: "Phone number is required." });
